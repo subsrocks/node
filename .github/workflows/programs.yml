@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   program:
+    name: program (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
