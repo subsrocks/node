@@ -89,6 +89,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
         with:
+          # The programs, not the records of the image's builds that build-push-action uploads.
+          pattern: subs-node-*
           path: out
           merge-multiple: true
       - run: |
