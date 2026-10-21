@@ -1,0 +1,68 @@
+name: ffmpeg
+
+# The ffmpeg the macOS program brings (scripts/ffmpeg.ts), for Apple silicon and Intel Macs: built
+# once for each version of the script, kept in the cache, and checked: it has VideoToolbox and the
+# encoders a render uses, and its libass picks fonts with fontconfig, as Linux's does.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - id: arch
+        run: echo "arch=$(uname -m | sed 's/x86_64/x64/')" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-macos-${{ steps.arch.outputs.arch }}-${{ hashFiles('scripts/ffmpeg.ts') }}
+      - name: Build tools
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: brew install meson ninja pkgconf nasm
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          WORK_DIR: ${{ runner.temp }}/ffmpeg-work
+        run: node scripts/ffmpeg.ts "$RUNNER_TEMP/ffmpeg"
+      - name: It has what a render needs
+        working-directory: ${{ runner.temp }}/ffmpeg
+        run: |
+          bin/ffmpeg -hide_banner -version | head -1
+          for name in h264_videotoolbox hevc_videotoolbox prores_videotoolbox libx264 libx265 libsvtav1 prores_ks aac; do
+            bin/ffmpeg -hide_banner -encoders | grep -q " $name " || { echo "::error::no $name"; exit 1; }
+          done
+          bin/ffmpeg -hide_banner -filters | grep -q ' ass ' || { echo "::error::no ass filter"; exit 1; }
+          bin/ffmpeg -hide_banner -decoders | grep -q ' libdav1d ' || { echo "::error::no libdav1d"; exit 1; }
+          otool -L bin/ffmpeg
+      - name: Its libass picks fonts with fontconfig
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p line/fonts && cd line
+          printf '<?xml version="1.0"?>\n<fontconfig><dir>%s/fonts</dir><cachedir>%s/cache</cachedir></fontconfig>\n' "$PWD" "$PWD" > fonts.conf
+          printf '[Script Info]\nScriptType: v4.00+\nPlayResX: 64\nPlayResY: 64\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Hi\n' > line.ass
+          FONTCONFIG_FILE="$PWD/fonts.conf" ../ffmpeg/bin/ffmpeg -hide_banner -v info -f lavfi -i color=black:size=64x64:rate=1 \
+            -frames:v 1 -vf ass=filename=line.ass:fontsdir=fonts -f null - 2>&1 | tee ass.log
+          grep -q 'Using font provider fontconfig' ass.log
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-macos-${{ steps.arch.outputs.arch }}
+          path: ${{ runner.temp }}/ffmpeg
+          retention-days: 7

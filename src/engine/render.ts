@@ -7,14 +7,16 @@ import {
   audioArgs,
   container,
   decodeArgs,
+  encoderOf,
   FPS_RATIOS,
+  formatFilters,
   fpsFilter,
-  pixelFormat,
   settingsOf,
   videoArgs,
 } from './encode.ts';
 import { JobError } from './errors.ts';
 import { NETWORK_INPUT, run, seconds } from './ffmpeg.ts';
+import type { Hardware } from './hardware.ts';
 import { objectUrl, originalInput, putFile, putJson } from './io.ts';
 
 /**
@@ -82,17 +84,21 @@ async function download(key: string, path: string): Promise<void> {
 
 /**
  * ffmpeg's `-progress` output (blocks of `key=value` lines, two a second) as the share of the
- * output written, handed to `write` every few seconds with an estimate of the time left.
- * Best-effort: a write that fails is skipped, never the encode, and one at a time.
+ * output written, handed to `write` every few seconds with an estimate of the time left: one
+ * encode's (`push`), or several at once (each its own `stream`, as a render's pieces are), whose
+ * outputs add up to the render. Best-effort: a write that fails is skipped, never the encode, and
+ * one at a time.
  */
 export class EncodeProgress {
   private readonly durationMs: number;
   private readonly write: (progress: ProgressReport) => Promise<void>;
   private readonly clock: () => number;
   private readonly started: number;
-  private buffer = '';
+  /** Output written so far, every stream's, in milliseconds. */
+  private written = 0;
   private lastWrite = Number.NEGATIVE_INFINITY;
   private writing: Promise<void> | null = null;
+  private readonly single = this.stream();
 
   constructor(
     durationMs: number,
@@ -105,15 +111,29 @@ export class EncodeProgress {
     this.started = clock();
   }
 
+  /** The one encode's output. */
   push(chunk: Buffer): void {
-    this.buffer += chunk.toString('utf8');
-    const lines = this.buffer.split('\n');
-    this.buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      // `N/A` until the first frame is out.
-      const done = /^out_time_us=(\d+)$/.exec(line.trim())?.[1];
-      if (done) this.update(Math.min(1, Number(done) / 1000 / this.durationMs));
-    }
+    this.single(chunk);
+  }
+
+  /** One of several encodes' output, which adds what it writes to the others'. */
+  stream(): (chunk: Buffer) => void {
+    let buffer = '';
+    let written = 0;
+    return (chunk) => {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        // `N/A` until the first frame is out.
+        const done = /^out_time_us=(\d+)$/.exec(line.trim())?.[1];
+        if (!done) continue;
+        const ms = Number(done) / 1000;
+        this.written += ms - written;
+        written = ms;
+        this.update(Math.min(1, this.written / this.durationMs));
+      }
+    };
   }
 
   /** Waits for a write in flight, so none lands after the job is done. */
@@ -165,10 +185,15 @@ export type PieceFrames = { startFrame: number; endFrame: number };
  * The video filters: frames onto the canonical timeline, at the render's frame rate when it sets
  * one, on its grid when it has one (frame `n` at `n / fps`, so `trim` counts them exactly),
  * scaled to fit the frame (subtitles are drawn at the output's size, so they stay sharp), the
- * subtitles, then letterboxed, in the encoder's pixel format. A `piece` keeps its frames only and
- * starts at zero; its subtitles are drawn on the render's timeline, as the whole would draw them.
+ * subtitles, then letterboxed, in the encoder's pixel format (and on to its hardware, `on`). A
+ * `piece` keeps its frames only and starts at zero; its subtitles are drawn on the render's
+ * timeline, as the whole would draw them.
  */
-export function renderFilter(job: RenderJob, piece?: PieceFrames): string {
+export function renderFilter(
+  job: RenderJob,
+  piece?: PieceFrames,
+  on: Hardware | null = encoderOf(job),
+): string {
   const settings = settingsOf(job);
   const shift = `setpts=PTS-${seconds(job.startPtsMs)}/TB`;
   const grid = job.grid;
@@ -179,9 +204,9 @@ export function renderFilter(job: RenderJob, piece?: PieceFrames): string {
   const cut = cutFilters(job.cuts ?? [], 'video');
   const timed = [shift, ...cut, ...(rate ? [rate] : []), ...(frames ? [frames] : [])];
   const restart = piece ? ['setpts=PTS-STARTPTS'] : [];
-  const format = `format=${pixelFormat(settings, job.encoder)}`;
+  const format = formatFilters(settings, on);
   const size = settings.size;
-  if (size === null) return [...timed, SUBTITLES_FILTER, ...restart, format].join(',');
+  if (size === null) return [...timed, SUBTITLES_FILTER, ...restart, ...format].join(',');
   const { width: w, height: h } = size;
   return [
     ...timed,
@@ -190,7 +215,7 @@ export function renderFilter(job: RenderJob, piece?: PieceFrames): string {
     `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`,
     'setsar=1',
     ...restart,
-    format,
+    ...format,
   ].join(',');
 }
 
@@ -288,21 +313,36 @@ export async function prepareRender(
 }
 
 /** Room a render keeps beside a copy of its original: more than its file is (about 9 GB at most). */
-const RENDER_SPARE_BYTES = 10 * 1000 ** 3;
+export const RENDER_SPARE_BYTES = 10 * 1000 ** 3;
 
-/** What a caller hears of a render as it goes: its progress, as often as storage does. */
-export type RenderHooks = { onProgress?: (progress: ProgressReport) => void };
+/**
+ * What a caller hears of a render as it goes: its progress, as often as storage does; and when it's
+ * made in pieces on the machine (`parallel.ts`), how many, so many at once.
+ */
+export type RenderHooks = {
+  onProgress?: (progress: ProgressReport) => void;
+  onPieces?: (plan: { pieces: number; slots: number }) => void;
+};
+
+/**
+ * How a machine makes a render: on its hardware when the job asks for it (subs.rocks's GPU
+ * machines' NVENC unless it says which), and on how many of its threads the CPU's encoders run
+ * (all it has unless told; a machine whose ffmpeg sees more processors than it may use is told).
+ */
+export type RenderOptions = { hardware?: Hardware; threads?: number | null };
 
 /** Burns the subtitles into the original with the template's fonts. */
 export async function render(
   job: RenderJob,
   workDir: string,
   hooks: RenderHooks = {},
+  options: RenderOptions = {},
 ): Promise<RenderResult> {
   const env = await prepareRender(job, workDir);
   // Its picture and sound read together: from a copy where there's room. A piece reads
   // only the picture, and the render's sound only the sound, which streams well whatever the file.
   const input = await originalInput(job.input.key, workDir, () => RENDER_SPARE_BYTES);
+  const on = encoderOf(job, options.hardware);
 
   const settings = settingsOf(job);
   const file = container(settings);
@@ -330,7 +370,7 @@ export async function render(
       '-progress',
       'pipe:1',
       ...NETWORK_INPUT,
-      ...decodeArgs(settings, job.encoder),
+      ...decodeArgs(on, options.threads ?? null),
       '-i',
       input,
       '-map',
@@ -338,10 +378,10 @@ export async function render(
       '-map',
       '0:a:0?',
       '-vf',
-      renderFilter(job),
+      renderFilter(job, undefined, on),
       '-af',
       renderAudioFilter(job),
-      ...videoArgs(settings, 0, job.encoder),
+      ...videoArgs(settings, 0, on, options.threads ?? null),
       ...audioArgs(settings),
       '-t',
       seconds(job.durationMs),

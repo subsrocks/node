@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -55,6 +56,34 @@ Options
 Docs: https://subs.rocks/docs/machines
 `;
 
+/**
+ * What a machine is called unless it's told: a Mac's own name (`Zach's MacBook Pro`), else its
+ * host name without the `.local` a Mac's network adds; in a container, which knows only its own
+ * id for a host name, `Docker` (the command Settings gives names it for the computer).
+ */
+export function defaultName(env: NodeJS.ProcessEnv, host = hostname()): string {
+  if (process.platform === 'darwin') {
+    try {
+      const name = execFileSync('scutil', ['--get', 'ComputerName'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2_000,
+      }).trim();
+      if (name) return name;
+    } catch {
+      // Not there: the host name, then.
+    }
+  }
+  if (env['SUBS_CONTAINER'] === '1' && /^[0-9a-f]{12}$/.test(host)) return 'Docker';
+  return host;
+}
+
+/** A name as the workspace keeps it: without a Mac network's `.local`, at most 60 characters. */
+export function machineName(name: string): string {
+  const trimmed = name.trim().replace(/\.local$/i, '');
+  return trimmed === '' ? 'machine' : trimmed.slice(0, 60);
+}
+
 /** Where the node keeps its files: the image's volume, or a folder in the home directory. */
 function defaultData(env: NodeJS.ProcessEnv): string {
   if (env['SUBS_CONTAINER'] === '1') return '/data';
@@ -95,7 +124,7 @@ export function parseOptions(argv: readonly string[], env: NodeJS.ProcessEnv): O
   if (log !== 'pretty' && log !== 'json') throw new UsageError('--log is pretty or json');
   const gpu = values.gpu ?? env['SUBS_GPU'] ?? 'auto';
   if (gpu !== 'auto' && gpu !== 'off') throw new UsageError('--gpu is auto or off');
-  const name = (values.name ?? env['SUBS_NAME'] ?? hostname()).trim();
+  const name = machineName(values.name ?? env['SUBS_NAME'] ?? defaultName(env));
   return {
     command: first as Command,
     server: serverUrl(values.url ?? env['SUBS_URL'] ?? 'https://subs.rocks'),
@@ -103,7 +132,7 @@ export function parseOptions(argv: readonly string[], env: NodeJS.ProcessEnv): O
     log,
     verbose: values.verbose ?? env['SUBS_VERBOSE'] === '1',
     token: values.token ?? env['SUBS_TOKEN'] ?? null,
-    name: name === '' ? 'machine' : name.slice(0, 60),
+    name,
     gpu,
     ffmpeg: values.ffmpeg ?? env['SUBS_FFMPEG'] ?? null,
   };

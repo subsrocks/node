@@ -2,7 +2,7 @@
 
 Render your [subs.rocks](https://subs.rocks) videos on machines of your own: a workstation with a fast graphics card, an edit bay that's idle at night, a server in a rack. The node connects to your workspace and waits for renders; each one it makes costs nothing: no render minutes, no credits.
 
-It's the same render engine subs.rocks runs on its own machines, so a render made here is the file subs.rocks would make: the same subtitles, drawn by the same libass with the same fonts, at the preset's settings (the program on a Mac aside: [see below](#the-program-linux-macos)).
+It's the same render engine subs.rocks runs on its own machines, so a render made here has the subtitles subs.rocks would draw: by the same libass, with the same fonts, at the preset's settings. And it uses what the machine has: a Mac's media engines, an NVIDIA, Intel or AMD graphics card, and every thread of a big processor.
 
 Machines of your own come with the **Team** and **Studio** plans.
 
@@ -10,48 +10,63 @@ Machines of your own come with the **Team** and **Studio** plans.
 
 In subs.rocks, open **Settings › Your machines** and choose **Add a machine**. It gives you a command with a token in it, good for an hour on as many machines as you run it on.
 
-### Docker (Linux, Windows, macOS)
-
-```sh
-docker run -d --name subs-node --restart unless-stopped \
-  -v subs-node:/data \
-  -e SUBS_TOKEN=sr_reg_… \
-  ghcr.io/subsrocks/node:1
-```
-
-The token is used once, to join; the `subs-node` volume keeps the machine's place in the workspace after that, so it comes back after a restart or an update without a new token. `docker logs -f subs-node` shows what it's doing.
-
-**With an NVIDIA graphics card**, add `--gpus all`: renders encode on the card, several times sooner (H.264 and H.265, and AV1 on cards that have it; ProRes always on the processor). The machine needs NVIDIA's driver and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). With Docker Compose, see [`compose.yaml`](./compose.yaml).
-
-### The program (Linux, macOS)
+### The program (macOS, Linux)
 
 ```sh
 curl -fsSL https://github.com/subsrocks/node/releases/latest/download/install.sh | sh
 subs-node start --token sr_reg_…
 ```
 
-The installer puts `subs-node` in `~/.local/bin`, checked against the release's `SHA256SUMS`, then checks the machine and says what it still needs. The program needs **ffmpeg 7 or newer, built with libass**: your package manager's on Linux (Debian 13 and Ubuntu 25.04 have 7); on a Mac with Apple silicon, `brew install ffmpeg-full` (Homebrew's `ffmpeg` has no libass; the node finds `ffmpeg-full`, which Homebrew keeps off the `PATH`, on its own, and `--ffmpeg` names any other). `subs-node doctor` checks the machine again. To keep it running, use your system's service manager (a systemd unit, a launchd agent) with `subs-node start`.
+The installer keeps the program in `~/.local/share/subs-node` and the `subs-node` command in `~/.local/bin`, checked against the release's `SHA256SUMS`, then checks the machine and says what it still needs.
 
-**On a Mac**, libass picks fonts with macOS's font system, so text a template's fonts can't draw (a font it names but doesn't bring, a character its fonts don't have) comes out in the Mac's own fonts, where subs.rocks's renders use their fallback font; `doctor` says so. The Docker image draws exactly as subs.rocks does, and is the easier way on an Intel Mac, where Homebrew builds `ffmpeg-full` from source.
+- **On a Mac** (Apple silicon or Intel, macOS 13 or newer), the program brings its own ffmpeg, [built here](./scripts/ffmpeg.ts) from the sources Debian builds the image's from, with the same libass and fonts: renders draw exactly as they do in the image, and encode on the Mac's media engines.
+- **On Linux**, it needs **ffmpeg 7 or newer, built with libass**, from your package manager (Debian 13 and Ubuntu 25.04 have 7). `--ffmpeg` names another.
 
-Windows: use Docker Desktop.
+To keep it running, use your system's service manager (a launchd agent, a systemd unit) with `subs-node start`. Windows: use Docker Desktop.
 
-## What it does
+### Docker (Linux, Windows, macOS)
+
+```sh
+docker run -d --name subs-node --restart unless-stopped \
+  -v subs-node:/data \
+  -e SUBS_NAME="$(hostname)" \
+  -e SUBS_TOKEN=sr_reg_… \
+  ghcr.io/subsrocks/node:1
+```
+
+The token is used once, to join; the `subs-node` volume keeps the machine's place in the workspace after that, so it comes back after a restart or an update without a new token. `SUBS_NAME` is what the workspace calls it, which a container can't tell. `docker logs -f subs-node` shows what it's doing. With Docker Compose, see [`compose.yaml`](./compose.yaml).
+
+- **With an NVIDIA graphics card**, add `--gpus all`. The machine needs NVIDIA's driver and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+- **With Intel or AMD graphics** (Linux), add `--device /dev/dri`. The image has VA-API's drivers (Mesa's for AMD, Intel's media driver), and joins the groups that own the device, whatever their numbers on the host.
+- **On a Mac**, prefer the program: Docker Desktop runs Linux in a virtual machine that can't reach the Mac's media engines, nor any graphics card on Windows.
+
+## How it renders
 
 ```
-subs.rocks node 1.0.0
-✓ ffmpeg 7.1.1 · H.264 (GPU) · H.265 (GPU) · AV1 · ProRes
-✓ AMD Ryzen 9 7950X · 32 threads · 64 GB · NVIDIA GeForce RTX 4090
-✓ Joined the workspace as “Edit bay”
+subs.rocks node 1.1.0
+✓ ffmpeg 7.1.5 · H.264 (media engine) · H.265 (media engine) · AV1 · ProRes (media engine)
+✓ Apple M4 Max · 16 threads · 64 GB
+✓ Encodes on Apple M4 Max's media engines
 ✓ Connected to subs.rocks as “Edit bay”
 • Waiting for renders
-• Rendering 12:04 at 3840×2160 → H.265 on the GPU
+• Rendering 17:44 at its own size → H.265 on the media engine
+• In 4 pieces, 2 at once
   Rendering ████████████░░░░░░░░░░░░ 48% · 3 min left
-✓ Rendered in 6 min · 1.2 GB
+✓ Rendered in 6 min · 3.9 GB
 ```
 
-- It finds out once, at start, what the machine can do: its ffmpeg, an encoder for each codec, and NVIDIA GPUs (each GPU encoder, and decoding on the GPU, tried on a few frames).
-- It holds one connection to subs.rocks and takes **one render at a time**. Add several machines and the workspace's renders spread across them: the best one that's free takes each (one that encodes it on a graphics card first, then the one with the most threads).
+- **It finds out at start what the machine can do:** its ffmpeg, an encoder for each codec, and its video hardware. Each hardware encoder is tried on a few frames in every way a render can ask of it (a constant quality, a capped one, an average or a constant bitrate, 10 bits, ProRes 4444), with the arguments a render uses, and decoding there too. subs.rocks sends a render to the hardware only when it was seen to make all the render asks; the rest encode on the processor.
+
+  | Hardware | Encodes | How it's reached |
+  |---|---|---|
+  | Apple silicon (VideoToolbox) | H.264, H.265, ProRes on chips with ProRes engines | The program on a Mac |
+  | Intel Mac (VideoToolbox) | H.264, H.265 | The program on a Mac |
+  | NVIDIA (NVENC) | H.264, H.265, AV1 on cards that have it | `--gpus all`, or the program on Linux |
+  | Intel, AMD on Linux (VA-API) | H.264, H.265, AV1 where the chip has it | `--device /dev/dri`, or the program on Linux |
+
+- **It renders in pieces at once where that's sooner.** One encoder keeps only a few threads busy, and one ffmpeg reads, draws the subtitles and converts frames one frame at a time. So a long render on a machine with threads to spare is cut into pieces on its frame grid, about one encoding for every four threads (as many as memory holds), two at once on video hardware, then joined and checked frame for frame, as subs.rocks's own machines join theirs; one that doesn't join is made whole. Measured on 16 threads, four pieces at once made 1.6 to 3.6 times one encoder's frames (x264, x265 and SVT-AV1, 1080p and 4K); on an NVIDIA L4, two made 1.7 to 1.85 times one's.
+- **It uses the threads it may.** In a container limited with `--cpus` or `--memory`, it plans by those limits and tells each encoder how many threads to use: encoders size themselves by the host's processors otherwise, and a limited container runs them several times slower.
+- It holds one connection to subs.rocks and takes **one render at a time**. Add several machines and the workspace's renders spread across them: the best one that's free takes each (one that encodes it on its hardware first, then the one with the most threads).
 - Each render runs in a process of its own. Stopping the render in subs.rocks stops it here, ffmpeg and all.
 - If the connection drops (a network blip, a subs.rocks deploy), it connects again and carries on with its render; subs.rocks waits three minutes for it before giving the render to another machine.
 
@@ -78,9 +93,9 @@ subs-node version
 | Flag | Environment | |
 |---|---|---|
 | `--token <token>` | `SUBS_TOKEN` | The registration token, to join the first time |
-| `--name <name>` | `SUBS_NAME` | What the workspace calls it; this machine's host name if not given |
-| `--gpu auto\|off` | `SUBS_GPU` | Encode on an NVIDIA GPU when there is one (`auto`, the default) |
-| `--ffmpeg <path>` | `SUBS_FFMPEG` | The ffmpeg to render with, its ffprobe beside it; found if not given: Homebrew's `ffmpeg-full` on a Mac, else the `PATH`'s |
+| `--name <name>` | `SUBS_NAME` | What the workspace calls it; a Mac's name, or the host name, if not given |
+| `--gpu auto\|off` | `SUBS_GPU` | Encode on the machine's video hardware when it has some (`auto`, the default) |
+| `--ffmpeg <path>` | `SUBS_FFMPEG` | The ffmpeg to render with, its ffprobe beside it; if not given, the program's own on a Mac, else the `PATH`'s |
 | `--data <dir>` | `SUBS_DATA` | Its credential, fonts and work: `/data` in the image, `~/.subs-node` otherwise |
 | `--url <url>` | `SUBS_URL` | Where subs.rocks is (`https://subs.rocks`) |
 | `--log pretty\|json` | `SUBS_LOG` | Lines for people, or one JSON object a line for a log collector |
@@ -101,9 +116,10 @@ The node says in its log when a newer version is out, and a machine too old to t
 
 | What you see | What to do |
 |---|---|
-| `ffmpeg didn't run`, `can't draw subtitles: it needs libass` | Install ffmpeg 7 with libass (on a Mac, `brew install ffmpeg-full`), or use the Docker image, which has it |
-| `libass here picks fonts with macOS's font system` | Text a template's fonts can't draw comes out in the Mac's fonts; for renders exactly like subs.rocks's, use the Docker image |
-| `ffmpeg can't decode on the GPU (CUDA)` | The NVIDIA driver or Container Toolkit isn't set up; renders encode on the processor meanwhile |
+| `ffmpeg didn't run`, `can't draw subtitles: it needs libass` | On Linux, install ffmpeg 7 with libass; on a Mac, run the install line again (the program brings its own); or use the Docker image, which has it |
+| `libass here picks fonts with macOS's font system` | An ffmpeg other than the program's (`--ffmpeg`) draws text a template's fonts can't in the Mac's fonts; leave `--ffmpeg` out |
+| `Encoding on the CPU. To encode on the graphics card, give the container it` | Add `--gpus all` (NVIDIA) or `--device /dev/dri` (Intel, AMD) to `docker run` |
+| `the NVIDIA GPU's encoders didn't work`, `the graphics' video encoders didn't work` | The driver (NVIDIA's, or VA-API's) isn't set up; renders encode on the processor meanwhile |
 | `That registration token is wrong or has expired` | Tokens last an hour: make a new one with **Add a machine** |
 | `This machine was removed from its workspace` | Add it again from Settings, with a new token |
 | `The workspace's plan doesn't include machines of its own` | It waits, and connects once the workspace is on Team or Studio |
@@ -117,9 +133,10 @@ pnpm build                       # dist/subs-node.mjs: run it with `node dist/su
 node scripts/build.ts --sea      # dist/subs-node-<os>-<arch>, a single executable (Node.js 25.5+)
 docker build -t subs-node .
 pnpm test                        # needs ffmpeg
+node scripts/ffmpeg.ts dist/ffmpeg   # on a Mac: the ffmpeg the program brings
 ```
 
-CI runs the tests on Linux (x64 and arm64) and macOS (Apple silicon), each with its ffmpeg, and builds, installs and checks the program on each platform it's released for, as a release does; once a release is out, it installs and runs it from where people get it.
+CI builds the macOS ffmpeg for Apple silicon and Intel (once for each version of its script), runs the tests on Linux (x64 and arm64) and both Macs against the ffmpeg each renders with, and builds, installs and checks the program on each platform it's released for, as a release does; once a release is out, it installs and runs it from where people get it.
 
 `src/job.ts` and `src/protocol.ts` are what a render is and how a node and subs.rocks talk; `src/engine` makes renders, `src/agent` is `subs-node`.
 
@@ -131,4 +148,4 @@ See [SECURITY.md](./SECURITY.md) to report a vulnerability.
 
 ## License
 
-[Apache License 2.0](./LICENSE). The image includes ffmpeg and other Debian packages under their own licenses.
+[Apache License 2.0](./LICENSE). The image includes ffmpeg and other Debian packages under their own licenses. The macOS program includes an ffmpeg built by [`scripts/ffmpeg.ts`](./scripts/ffmpeg.ts), under the GPL (version 2 or later, as x264 and x265 make it); each release attaches the sources it's built from (`ffmpeg-sources.tar`).

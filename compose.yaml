@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     environment:
       SUBS_TOKEN: ${SUBS_TOKEN:-}
+      # What the workspace calls it: a container doesn't know the computer's name.
       # SUBS_NAME: Edit bay
     volumes:
       - data:/data
@@ -17,5 +18,8 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu, video, compute, utility]
+    # With Intel or AMD graphics (Linux), renders encode on them:
+    # devices:
+    #   - /dev/dri:/dev/dri
 volumes:
   data:

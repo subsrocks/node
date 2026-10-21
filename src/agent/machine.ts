@@ -1,44 +1,40 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm, statfs, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, statfs, writeFile } from 'node:fs/promises';
 import { availableParallelism, cpus, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
-import type { VideoCodec } from '../job.ts';
+import type { HardwareKind, VideoCodec } from '../job.ts';
 import type { NodeMachine } from '../protocol.ts';
+import { type FoundHardware, findHardware } from './hardware.ts';
 import type { GpuUse } from './options.ts';
 import type { Tools } from './tools.ts';
 
 /**
  * What this machine can do, found out once at start: its ffmpeg (which must draw subtitles with
- * libass), the encoders it has for each codec, and NVIDIA GPUs it can encode on. Every GPU encoder
- * is tried on a few frames, and CUDA decoding too, since a GPU render decodes there: a driver
- * that's missing or too old shows up here, not halfway through someone's render. A line is drawn
- * too, for the font system libass picks fonts with.
+ * libass), the encoders it has for each codec, the video hardware it encodes on (`hardware.ts`,
+ * each encoder tried), the threads and memory it may use, and the font system libass picks fonts
+ * with (a line is drawn to see).
  */
 
-/** Each codec's CPU encoder, and its GPU's (NVENC); ProRes has no GPU encoder. */
+/** Each codec's CPU encoder. */
 const CPU_ENCODERS: Readonly<Record<VideoCodec, string>> = {
   h264: 'libx264',
   hevc: 'libx265',
   av1: 'libsvtav1',
   prores: 'prores_ks',
 };
-const GPU_ENCODERS: Readonly<Partial<Record<VideoCodec, string>>> = {
-  h264: 'h264_nvenc',
-  hevc: 'hevc_nvenc',
-  av1: 'av1_nvenc',
-};
 
 /** A command's output (its errors' too, with `stderr`), or null when it couldn't run or failed. */
 export function capture(
   command: string,
   args: readonly string[],
-  options: { cwd?: string; stderr?: boolean; timeoutMs?: number } = {},
+  options: { cwd?: string; stderr?: boolean; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<string | null> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(command, args, {
         cwd: options.cwd,
+        ...(options.env ? { env: options.env } : {}),
         stdio: ['ignore', 'pipe', 'pipe'],
         signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
       });
@@ -70,82 +66,6 @@ export function listedNames(text: string): Set<string> {
   return names;
 }
 
-/** `nvidia-smi`'s CSV of names and memory (MiB) → each GPU. */
-export function nvidiaGpus(text: string): NodeMachine['gpus'] {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 16)
-    .map((line) => {
-      const comma = line.lastIndexOf(',');
-      const name = (comma === -1 ? line : line.slice(0, comma)).trim().slice(0, 120);
-      const mib = Number(comma === -1 ? Number.NaN : line.slice(comma + 1).trim());
-      return { name, memoryBytes: Number.isFinite(mib) ? Math.round(mib * 1024 * 1024) : null };
-    });
-}
-
-/** Whether ffmpeg encodes a few frames with `encoder` (and, for the GPU, decodes on it). */
-async function encodes(tools: Tools, encoder: string, extra: string[] = []): Promise<boolean> {
-  const output = await capture(tools.ffmpeg, [
-    '-hide_banner',
-    '-v',
-    'error',
-    ...extra,
-    '-f',
-    'lavfi',
-    '-i',
-    'testsrc2=size=320x240:rate=30',
-    '-frames:v',
-    '5',
-    '-c:v',
-    encoder,
-    '-f',
-    'null',
-    '-',
-  ]);
-  return output !== null;
-}
-
-/** Whether ffmpeg decodes on the GPU (`-hwaccel cuda`), which a GPU render asks for. */
-async function decodesOnGpu(tools: Tools): Promise<boolean> {
-  const dir = await mkdtemp(join(tmpdir(), 'subs-node-cuda-'));
-  try {
-    const clip = join(dir, 'clip.mp4');
-    const made = await capture(tools.ffmpeg, [
-      '-hide_banner',
-      '-v',
-      'error',
-      '-f',
-      'lavfi',
-      '-i',
-      'testsrc2=size=320x240:rate=30',
-      '-frames:v',
-      '10',
-      '-c:v',
-      'libx264',
-      '-y',
-      clip,
-    ]);
-    if (made === null) return false;
-    const decoded = await capture(tools.ffmpeg, [
-      '-hide_banner',
-      '-v',
-      'error',
-      '-hwaccel',
-      'cuda',
-      '-i',
-      clip,
-      '-f',
-      'null',
-      '-',
-    ]);
-    return decoded !== null;
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
 /** The font system libass says it picks fonts with: `fontconfig`, or macOS's `coretext`. */
 export function fontProviderOf(text: string): string | null {
   return /Using font provider (\w+)/.exec(text)?.[1] ?? null;
@@ -172,6 +92,12 @@ async function fontProvider(tools: Tools): Promise<string | null> {
   try {
     await mkdir(join(dir, 'fonts'));
     await writeFile(join(dir, 'line.ass'), LINE);
+    // A fontconfig of its own, as a render has: one built without a default one says so otherwise.
+    const conf = join(dir, 'fonts.conf');
+    await writeFile(
+      conf,
+      `<?xml version="1.0"?>\n<fontconfig><dir>${join(dir, 'fonts')}</dir><cachedir>${join(dir, 'cache')}</cachedir></fontconfig>\n`,
+    );
     const output = await capture(
       tools.ffmpeg,
       [
@@ -190,7 +116,7 @@ async function fontProvider(tools: Tools): Promise<string | null> {
         'null',
         '-',
       ],
-      { cwd: dir, stderr: true },
+      { cwd: dir, stderr: true, env: { ...process.env, FONTCONFIG_FILE: conf } },
     );
     return output === null ? null : fontProviderOf(output);
   } finally {
@@ -206,26 +132,84 @@ const FONT_SYSTEMS: Readonly<Record<string, string>> = {
 
 export type Described = {
   machine: NodeMachine;
+  /** Its video hardware, as a render runs on it; null: none, or `--gpu off`. */
+  hardware: FoundHardware | null;
   /** What stops it rendering: no ffmpeg, no libass, no H.264 encoder. */
   problems: string[];
   /** What it can do without, said once. */
   notes: string[];
 };
 
-/** This machine: its CPU, memory, GPUs, ffmpeg and the codecs it encodes. */
+/** A number from a file of the kernel's, or null. */
+async function kernelNumber(path: string): Promise<number | null> {
+  const text = await readFile(path, 'utf8').catch(() => null);
+  if (text === null) return null;
+  const value = Number(text.trim());
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * The threads it may use: what it may run on (`availableParallelism`), and in a container, no more
+ * than its CPU limit (cgroup's `cpu.max`, `docker run --cpus`), which encoders don't see: they size
+ * their threads by the host's processors, and a limited container runs them several times slower.
+ */
+export async function threadBudget(): Promise<number> {
+  const threads = Math.max(1, availableParallelism());
+  if (process.platform !== 'linux') return threads;
+  const max = await readFile('/sys/fs/cgroup/cpu.max', 'utf8').catch(() => null);
+  const [quota, period] = max?.trim().split(/\s+/) ?? [];
+  let limit: number | null = null;
+  if (quota && quota !== 'max' && period) limit = Number(quota) / Number(period);
+  else {
+    const v1 = await kernelNumber('/sys/fs/cgroup/cpu/cpu.cfs_quota_us');
+    const v1Period = await kernelNumber('/sys/fs/cgroup/cpu/cpu.cfs_period_us');
+    if (v1 !== null && v1Period !== null) limit = v1 / v1Period;
+  }
+  return limit !== null && Number.isFinite(limit) && limit > 0
+    ? Math.max(1, Math.min(threads, Math.ceil(limit)))
+    : threads;
+}
+
+/** The memory it may use: the machine's, or a container's limit (`docker run --memory`). */
+export async function memoryBudget(): Promise<number> {
+  const total = totalmem();
+  if (process.platform !== 'linux') return total;
+  const limit =
+    (await kernelNumber('/sys/fs/cgroup/memory.max')) ??
+    (await kernelNumber('/sys/fs/cgroup/memory/memory.limit_in_bytes'));
+  return limit !== null && limit < total ? limit : total;
+}
+
+/**
+ * The processor's name: as the system says it, or on ARM Linux, which names none (Apple's chips
+ * in Docker Desktop's machine among them), by its maker's code.
+ */
+async function cpuModel(): Promise<string> {
+  const model = (cpus()[0]?.model ?? '').replace(/\s+/g, ' ').trim();
+  if (model && model !== 'unknown') return model.slice(0, 120);
+  const info = await readFile('/proc/cpuinfo', 'utf8').catch(() => '');
+  const maker = /^CPU implementer\s*:\s*0x([0-9a-f]+)/im.exec(info)?.[1];
+  const makers: Record<string, string> = { '41': 'Arm', '61': 'Apple silicon', '51': 'Qualcomm' };
+  return (maker && makers[maker.toLowerCase()]) || 'unknown';
+}
+
+/** This machine: its CPU, memory, video hardware, ffmpeg and the codecs it encodes. */
 export async function describeMachine(options: {
   tools: Tools;
   gpu: GpuUse;
-  /** Where it works, for its free space. */
+  /** Where it works, for its free space, and to make a clip in. */
   workDir: string;
   platform?: NodeJS.Platform;
 }): Promise<Described> {
   const { tools } = options;
+  const platform = options.platform ?? process.platform;
   const problems: string[] = [];
   const notes: string[] = [];
-  // Homebrew's ffmpeg has no libass; its ffmpeg-full has, for Apple silicon (Intel Macs build it).
-  const mac = (options.platform ?? process.platform) === 'darwin';
-  const getIt = mac ? ' (on a Mac: brew install ffmpeg-full, or run the Docker image)' : '';
+  // The program brings its ffmpeg on a Mac: one missing is put back by installing again.
+  const getIt =
+    platform === 'darwin'
+      ? ' (run the install line again, which brings it, or run the Docker image)'
+      : '';
   const [versionText, encoderText, filterText, probeText] = await Promise.all([
     capture(tools.ffmpeg, ['-hide_banner', '-version']),
     capture(tools.ffmpeg, ['-hide_banner', '-encoders']),
@@ -233,8 +217,9 @@ export async function describeMachine(options: {
     capture(tools.ffprobe, ['-hide_banner', '-version']),
   ]);
   const version = versionText === null ? null : ffmpegVersion(versionText);
-  if (versionText === null)
+  if (versionText === null) {
     problems.push(`ffmpeg didn't run (${tools.ffmpeg}): install it${getIt}`);
+  }
   if (versionText !== null && probeText === null) {
     problems.push(`ffprobe didn't run (${tools.ffprobe}): install it${getIt}`);
   }
@@ -249,7 +234,7 @@ export async function describeMachine(options: {
     const provider = await fontProvider(tools);
     if (provider !== null && provider !== 'fontconfig') {
       notes.push(
-        `libass here picks fonts with ${FONT_SYSTEMS[provider] ?? `the system's (${provider})`}, not a render's fonts alone: a font a template doesn't bring, or a character its fonts lack, can draw unlike subs.rocks's renders (the Docker image draws them exactly)`,
+        `libass here picks fonts with ${FONT_SYSTEMS[provider] ?? `the system's (${provider})`}, not a render's fonts alone: a font a template doesn't bring, or a character its fonts lack, can draw unlike subs.rocks's renders`,
       );
     }
   }
@@ -266,28 +251,26 @@ export async function describeMachine(options: {
     notes.push(`no encoder for ${missing.join(', ')}: renders in it go to another machine`);
   }
 
-  let gpus: NodeMachine['gpus'] = [];
-  const gpu: VideoCodec[] = [];
-  const nvencListed = Object.values(GPU_ENCODERS).some((name) => encoders.has(name));
-  if (options.gpu === 'off') {
-    if (nvencListed) notes.push('not encoding on a GPU (--gpu off)');
-  } else if (nvencListed) {
-    const smi = await capture('nvidia-smi', [
-      '--query-gpu=name,memory.total',
-      '--format=csv,noheader,nounits',
-    ]);
-    gpus = smi === null ? [] : nvidiaGpus(smi);
-    if (gpus.length > 0) {
-      if (await decodesOnGpu(tools)) {
-        for (const [codec, encoder] of Object.entries(GPU_ENCODERS) as [VideoCodec, string][]) {
-          if (encoders.has(encoder) && (await encodes(tools, encoder))) gpu.push(codec);
-        }
-        if (gpu.length === 0) notes.push("the GPU's encoders didn't work: encoding on the CPU");
-      } else {
-        notes.push("ffmpeg can't decode on the GPU (CUDA): encoding on the CPU");
-      }
-    }
-  }
+  const model = await cpuModel();
+  const scratch = await mkdtemp(join(tmpdir(), 'subs-node-trial-'));
+  const search = await findHardware({
+    tools,
+    capture,
+    gpu: options.gpu,
+    encoders,
+    platform,
+    cpuModel: model,
+    scratch,
+  }).finally(() => rm(scratch, { recursive: true, force: true }));
+  notes.push(...search.notes);
+  const found = versionText === null ? null : search.found;
+  const gpu = found ? (Object.keys(found.features) as VideoCodec[]) : [];
+  const gpus: NodeMachine['gpus'] =
+    found?.hardware.kind === 'nvenc'
+      ? search.nvidia
+      : found?.hardware.kind === 'vaapi'
+        ? [{ name: found.name, memoryBytes: null }]
+        : [];
 
   let diskBytes: number | null = null;
   try {
@@ -301,16 +284,17 @@ export async function describeMachine(options: {
       os: process.platform,
       arch: process.arch,
       container: process.env['SUBS_CONTAINER'] === '1',
-      cpu: {
-        model: (cpus()[0]?.model ?? 'unknown').replace(/\s+/g, ' ').trim().slice(0, 120),
-        threads: Math.max(1, availableParallelism()),
-      },
-      memoryBytes: totalmem(),
-      gpus: gpu.length > 0 ? gpus : [],
+      cpu: { model, threads: await threadBudget() },
+      memoryBytes: await memoryBudget(),
+      gpus,
       encoders: { cpu, gpu },
+      hardware: found
+        ? { kind: found.hardware.kind, name: found.name, features: found.features }
+        : null,
       ffmpeg: (version ?? 'unknown').slice(0, 80),
       diskBytes,
     },
+    hardware: found,
     problems,
     notes,
   };
@@ -332,11 +316,25 @@ const CODEC_NAMES: Readonly<Record<VideoCodec, string>> = {
   prores: 'ProRes',
 };
 
-/** The codecs it encodes, the GPU's marked: `H.264 (GPU) · H.265 (GPU) · AV1 · ProRes`. */
+/** Where a kind of hardware encodes, as people know it. */
+const ON: Readonly<Record<HardwareKind, string>> = {
+  nvenc: 'GPU',
+  vaapi: 'GPU',
+  videotoolbox: 'media engine',
+};
+
+/**
+ * The codecs it encodes, the hardware's marked: `H.264 (GPU) · H.265 (GPU) · AV1 · ProRes`, or on
+ * a Mac, `H.265 (media engine)`.
+ */
 export function encodersLine(machine: NodeMachine): string {
-  return machine.encoders.cpu
+  const on = ON[machine.hardware?.kind ?? 'nvenc'];
+  const codecs = (Object.keys(CODEC_NAMES) as VideoCodec[]).filter(
+    (codec) => machine.encoders.cpu.includes(codec) || machine.encoders.gpu.includes(codec),
+  );
+  return codecs
     .map((codec) =>
-      machine.encoders.gpu.includes(codec) ? `${CODEC_NAMES[codec]} (GPU)` : CODEC_NAMES[codec],
+      machine.encoders.gpu.includes(codec) ? `${CODEC_NAMES[codec]} (${on})` : CODEC_NAMES[codec],
     )
     .join(' · ');
 }

@@ -1,9 +1,10 @@
 name: programs
 
-# The program as a single executable, built on each platform it's released for, then installed and
-# run as people do: `install.sh` piped into the platform's sh (dash on Ubuntu, macOS's old bash),
-# from this run's files, and `subs-node doctor` with ffmpeg installed as people install it. CI runs
-# it on every change; a release releases what it builds.
+# The program as a single executable, built on each platform it's released for, packed as a
+# release packs it (on a Mac, with the ffmpeg it brings, from ffmpeg.yml), then installed and run as
+# people do: `install.sh` piped into the platform's sh (dash on Ubuntu, macOS's old bash), from
+# this run's files, and `subs-node doctor`, which tries the machine's video hardware. CI runs it on
+# every change; a release releases what it builds. Needs ffmpeg.yml's artifacts in the same run.
 
 on:
   workflow_call:
@@ -17,14 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: ubuntu-24.04
-          - runner: ubuntu-24.04-arm
-          - runner: macos-15
-          # Homebrew builds nothing for Intel Macs (ffmpeg-full would compile for an hour), so
-          # this one is installed and run, without an ffmpeg to check.
-          - runner: macos-15-intel
-            ffmpeg: none
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -43,33 +37,37 @@ jobs:
           for file in dist/subs-node-*-*; do
             case "$file" in *.*) ;; *) echo "name=${file#dist/}" >> "$GITHUB_OUTPUT" ;; esac
           done
-      - name: Packaged as a release packages it
+      - id: arch
+        run: echo "arch=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')" >> "$GITHUB_OUTPUT"
+      - if: runner.os == 'macOS'
+        uses: actions/download-artifact@v7
+        with:
+          name: ffmpeg-macos-${{ steps.arch.outputs.arch }}
+          path: ${{ runner.temp }}/ffmpeg
+      - name: Packed as a release packs it
         env:
           NAME: ${{ steps.name.outputs.name }}
         run: |
-          mkdir -p "$RUNNER_TEMP/release"
-          tar -czf "$RUNNER_TEMP/release/$NAME.tar.gz" -C dist "$NAME"
+          # A folder of the program and, on a Mac, the ffmpeg it brings.
+          mkdir -p "$RUNNER_TEMP/release" "$RUNNER_TEMP/pack/$NAME"
+          cp "dist/$NAME" "$RUNNER_TEMP/pack/$NAME/subs-node"
+          if [ "$RUNNER_OS" = macOS ]; then
+            cp -R "$RUNNER_TEMP/ffmpeg" "$RUNNER_TEMP/pack/$NAME/ffmpeg"
+            chmod 0755 "$RUNNER_TEMP/pack/$NAME/ffmpeg/bin/"*
+          fi
+          tar -czf "$RUNNER_TEMP/release/$NAME.tar.gz" -C "$RUNNER_TEMP/pack" "$NAME"
           cp scripts/install.sh "$RUNNER_TEMP/release/"
           cd "$RUNNER_TEMP/release" && shasum -a 256 "$NAME.tar.gz" > SHA256SUMS
-      - name: ffmpeg, as people install it
-        if: matrix.ffmpeg != 'none'
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: 1
-          HOMEBREW_NO_INSTALL_CLEANUP: 1
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            # Homebrew's ffmpeg with libass, which it keeps off the PATH: the program finds it.
-            brew install ffmpeg-full
-          else
-            sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-          fi
+      - name: ffmpeg on Linux, as people install it
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Installed as people install it
         env:
           SUBS_NODE_FROM: file://${{ runner.temp }}/release
           SUBS_NODE_DIR: ${{ runner.temp }}/bin
+          SUBS_NODE_HOME: ${{ runner.temp }}/home
         run: curl -fsSL "$SUBS_NODE_FROM/install.sh" | sh
       - name: It can render
-        if: matrix.ffmpeg != 'none'
         run: '"$RUNNER_TEMP/bin/subs-node" doctor'
       - uses: actions/upload-artifact@v7
         with:

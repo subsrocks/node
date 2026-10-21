@@ -3,8 +3,9 @@
 #
 #   curl -fsSL https://github.com/subsrocks/node/releases/latest/download/install.sh | sh
 #
-# It downloads the program for this machine (Linux or macOS, x64 or arm64), checks it against the
-# release's SHA256SUMS, puts it in ~/.local/bin (SUBS_NODE_DIR to choose another folder), and
+# It downloads the program for this machine (Linux or macOS, x64 or arm64; on a Mac with the
+# ffmpeg it brings), checks it against the release's SHA256SUMS, keeps it in
+# ~/.local/share/subs-node (SUBS_NODE_HOME), puts the command in ~/.local/bin (SUBS_NODE_DIR), and
 # checks the machine can render. SUBS_NODE_VERSION=1.2.3 installs that version instead of the
 # latest, and SUBS_NODE_FROM=<url> installs from a folder of a release's files (CI tests the
 # programs it builds so). Run it again to update.
@@ -14,6 +15,7 @@ set -eu
 
 REPO="https://github.com/subsrocks/node"
 DIR="${SUBS_NODE_DIR:-${HOME}/.local/bin}"
+HOME_DIR="${SUBS_NODE_HOME:-${HOME}/.local/share/subs-node}"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'subs-node install: %s\n' "$*" >&2; exit 1; }
@@ -64,9 +66,23 @@ fi
 
 tar -xzf "${work}/${asset}.tar.gz" -C "${work}"
 mkdir -p "${DIR}"
-mv "${work}/${asset}" "${DIR}/subs-node.new"
-chmod 0755 "${DIR}/subs-node.new"
-mv "${DIR}/subs-node.new" "${DIR}/subs-node"
+if [ -d "${work}/${asset}" ]; then
+  # The program and what it brings, kept together, the old copy replaced whole; the command, a
+  # link to it.
+  mkdir -p "$(dirname "${HOME_DIR}")"
+  rm -rf "${HOME_DIR}.new" "${HOME_DIR}.old"
+  mv "${work}/${asset}" "${HOME_DIR}.new"
+  chmod 0755 "${HOME_DIR}.new/subs-node"
+  if [ -e "${HOME_DIR}" ]; then mv "${HOME_DIR}" "${HOME_DIR}.old"; fi
+  mv "${HOME_DIR}.new" "${HOME_DIR}"
+  rm -rf "${HOME_DIR}.old"
+  ln -sf "${HOME_DIR}/subs-node" "${DIR}/subs-node.new"
+else
+  # A release before 1.1: the program alone.
+  mv "${work}/${asset}" "${DIR}/subs-node.new"
+  chmod 0755 "${DIR}/subs-node.new"
+fi
+mv -f "${DIR}/subs-node.new" "${DIR}/subs-node"
 say "Installed $("${DIR}/subs-node" version) at ${DIR}/subs-node"
 
 case ":${PATH}:" in

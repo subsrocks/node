@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -28,14 +29,19 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
 
+  ffmpeg:
+    # The ffmpeg the macOS program brings, built once for each version of its script.
+    uses: ./.github/workflows/ffmpeg.yml
+
   test:
-    # The engine and the agent against each platform's ffmpeg, renders end to end, the install
-    # script in its sh, and every encode a preset can ask for: Ubuntu's ffmpeg on Linux, Homebrew's
-    # ffmpeg-full on a Mac (Apple silicon: Homebrew builds nothing for Intel Macs).
+    # The engine and the agent against the ffmpeg each platform renders with, renders end to end
+    # (whole, and in pieces at once), the install script in its sh, and every encode a preset can
+    # ask for: Ubuntu's ffmpeg on Linux, the program's own on Macs, Apple silicon and Intel.
+    needs: [ffmpeg]
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -45,14 +51,18 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - id: arch
+        run: echo "arch=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')" >> "$GITHUB_OUTPUT"
+      - if: runner.os == 'macOS'
+        uses: actions/download-artifact@v7
+        with:
+          name: ffmpeg-macos-${{ steps.arch.outputs.arch }}
+          path: ${{ runner.temp }}/ffmpeg
       - name: ffmpeg
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: 1
-          HOMEBREW_NO_INSTALL_CLEANUP: 1
         run: |
           if [ "$RUNNER_OS" = macOS ]; then
-            brew install ffmpeg-full
-            echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
+            chmod 0755 "$RUNNER_TEMP/ffmpeg/bin/"*
+            echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
           else
             sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
           fi
@@ -62,6 +72,7 @@ jobs:
       - run: node scripts/encoders.ts
 
   programs:
+    needs: [ffmpeg]
     uses: ./.github/workflows/programs.yml
 
   image:
@@ -81,3 +92,6 @@ jobs:
             docker build --build-arg IMAGES=mirror.gcr.io/library -t subs-node .
       - run: docker run --rm subs-node version
       - run: docker run --rm subs-node doctor --url https://subs.rocks
+      # VA-API's drivers for Intel's and AMD's graphics, and the node as its own user.
+      - run: docker run --rm --entrypoint sh subs-node -c 'ls /usr/lib/*/dri/*_drv_video.so'
+      - run: test "$(docker run --rm --entrypoint /app/entrypoint.sh subs-node version >/dev/null && docker run --rm --entrypoint sh subs-node -c 'stat -c %U /data')" = subs

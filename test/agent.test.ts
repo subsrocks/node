@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { nvidiaGpus, trialArgs, trialSettings, vaapiName } from '../src/agent/hardware.ts';
 import {
   describeMachine,
   encodersLine,
@@ -9,13 +10,19 @@ import {
   fontProviderOf,
   listedNames,
   machineLine,
-  nvidiaGpus,
 } from '../src/agent/machine.ts';
-import { parseOptions, serverUrl, UsageError } from '../src/agent/options.ts';
+import {
+  defaultName,
+  machineName,
+  parseOptions,
+  serverUrl,
+  UsageError,
+} from '../src/agent/options.ts';
 import { duration, Output, size } from '../src/agent/output.ts';
 import { jobLine, newer } from '../src/agent/session.ts';
 import { Store } from '../src/agent/store.ts';
 import { findTools } from '../src/agent/tools.ts';
+import { parallelPlan } from '../src/engine/parallel.ts';
 import type { RenderJob } from '../src/job.ts';
 import type { NodeMachine } from '../src/protocol.ts';
 
@@ -41,6 +48,18 @@ describe('the command line', () => {
     expect(parseOptions(['--ffmpeg', '/opt/ffmpeg/bin/ffmpeg'], { SUBS_FFMPEG: 'x' }).ffmpeg).toBe(
       '/opt/ffmpeg/bin/ffmpeg',
     );
+  });
+
+  it('names a machine for the computer, not a container’s id or a Mac network’s .local', () => {
+    expect(machineName('Zachs-MacBook-Pro.local')).toBe('Zachs-MacBook-Pro');
+    expect(machineName('  ')).toBe('machine');
+    expect(machineName('x'.repeat(80))).toHaveLength(60);
+    if (process.platform !== 'darwin') {
+      expect(defaultName({ SUBS_CONTAINER: '1' }, '08fee3664f1d')).toBe('Docker');
+      expect(defaultName({}, '08fee3664f1d')).toBe('08fee3664f1d');
+      expect(defaultName({ SUBS_CONTAINER: '1' }, 'edit-bay')).toBe('edit-bay');
+    }
+    expect(parseOptions(['--name', 'Studio.local'], {}).name).toBe('Studio');
   });
 
   it('says what’s wrong with what it was given', () => {
@@ -85,12 +104,12 @@ describe('what the machine can do', () => {
     expect(fontProviderOf('[Parsed_ass_0 @ 0x5f] Added subtitle file')).toBeNull();
   });
 
-  it('says how to get an ffmpeg that renders, on a Mac Homebrew’s with libass', async () => {
+  it('says how to get an ffmpeg that renders: on a Mac, the program’s own, installed again', async () => {
     const missing = { ffmpeg: '/nowhere/ffmpeg', ffprobe: '/nowhere/ffprobe' };
     const workDir = mkdtempSync(join(tmpdir(), 'subs-node-machine-'));
     const mac = await describeMachine({ tools: missing, gpu: 'off', workDir, platform: 'darwin' });
     expect(mac.problems).toEqual([
-      "ffmpeg didn't run (/nowhere/ffmpeg): install it (on a Mac: brew install ffmpeg-full, or run the Docker image)",
+      "ffmpeg didn't run (/nowhere/ffmpeg): install it (run the install line again, which brings it, or run the Docker image)",
     ]);
     const linux = await describeMachine({ tools: missing, gpu: 'off', workDir, platform: 'linux' });
     expect(linux.problems).toEqual(["ffmpeg didn't run (/nowhere/ffmpeg): install it"]);
@@ -119,6 +138,110 @@ describe('what the machine can do', () => {
       'AMD Ryzen 9 7950X · 32 threads · 64 GB · NVIDIA GeForce RTX 4090',
     );
     expect(encodersLine(machine)).toBe('H.264 (GPU) · H.265 (GPU) · AV1 · ProRes');
+    const mac: NodeMachine = {
+      ...machine,
+      cpu: { model: 'Apple M4 Max', threads: 16 },
+      gpus: [],
+      encoders: { cpu: ['h264', 'hevc', 'av1', 'prores'], gpu: ['h264', 'hevc', 'prores'] },
+      hardware: { kind: 'videotoolbox', name: 'Apple M4 Max', features: {} },
+    };
+    expect(machineLine(mac)).toBe('Apple M4 Max · 16 threads · 64 GB');
+    expect(encodersLine(mac)).toBe(
+      'H.264 (media engine) · H.265 (media engine) · AV1 · ProRes (media engine)',
+    );
+  });
+
+  it('names Intel’s and AMD’s graphics from their drivers', () => {
+    expect(
+      vaapiName(
+        '[AVHWDeviceContext @ 0x1] VAAPI driver: Mesa Gallium driver 25.0.7-2 for AMD Radeon RX 7900 XTX (radeonsi, navi31, LLVM 19.1.7, DRM 3.61, 6.12.48).\n',
+      ),
+    ).toBe('AMD Radeon RX 7900 XTX');
+    expect(
+      vaapiName(
+        '[AVHWDeviceContext @ 0x1] VAAPI driver: Intel iHD driver for Intel(R) Gen Graphics - 25.2.3 ().\n',
+      ),
+    ).toBe('Intel graphics');
+    expect(vaapiName('nothing')).toBeNull();
+  });
+
+  it('tries hardware as a render uses it: its device, its upload, the render’s encoder', () => {
+    const args = trialArgs(
+      { kind: 'vaapi', device: '/dev/dri/renderD129', decode: true },
+      trialSettings('hevc', 'tenBit'),
+    );
+    expect(args.slice(0, 7)).toEqual([
+      '-hide_banner',
+      '-v',
+      'error',
+      '-init_hw_device',
+      'vaapi=hw:/dev/dri/renderD129',
+      '-filter_hw_device',
+      'hw',
+    ]);
+    // Encoding alone: decoding is tried by itself.
+    expect(args).not.toContain('-hwaccel');
+    expect(args[args.indexOf('-vf') + 1]).toBe('format=p010le,hwupload');
+    expect(args).toEqual(expect.arrayContaining(['-c:v', 'hevc_vaapi', '-profile:v', 'main10']));
+    expect(trialSettings('h264', 'capped').rate).toEqual({ mode: 'crf', crf: 23, maxKbps: 6000 });
+  });
+});
+
+describe('a render on this machine’s threads', () => {
+  const job = (minutes: number, grid = true) => ({
+    durationMs: minutes * 60_000,
+    ...(grid ? { grid: { fps: '30' as const, frames: minutes * 1800 } } : {}),
+    settings: {
+      codec: 'hevc' as const,
+      size: null,
+      fps: null,
+      rate: { mode: 'vbr' as const, kbps: 30_000, maxKbps: 60_000 },
+      speed: 'medium' as const,
+      tenBit: false,
+      proresProfile: 'hq' as const,
+      keyframeSeconds: null,
+      audio: { kbps: 320, sampleRate: null },
+    },
+    crf: 23,
+    speed: 'medium' as const,
+    audioKbps: 320,
+    width: null,
+    height: null,
+  });
+  const k4 = 3840 * 1920;
+  const gb = 1024 ** 3;
+
+  it('encodes a piece for every four threads, as many as its memory holds', () => {
+    expect(parallelPlan(job(18), { threads: 16, memoryBytes: 64 * gb }, null, k4)).toEqual({
+      slots: 4,
+      pieces: 8,
+      threads: 4,
+    });
+    // Docker Desktop's 8 GB holds three 4K encodes of H.265.
+    expect(parallelPlan(job(18), { threads: 16, memoryBytes: 8 * gb }, null, k4)).toMatchObject({
+      slots: 3,
+      threads: 5,
+    });
+    expect(parallelPlan(job(18), { threads: 64, memoryBytes: 256 * gb }, null, k4).slots).toBe(8);
+  });
+
+  it('makes it whole on a small machine, a short render, or one without a frame grid', () => {
+    const whole = { slots: 1, pieces: 1, threads: 4 };
+    expect(parallelPlan(job(18), { threads: 4, memoryBytes: 64 * gb }, null, k4)).toEqual(whole);
+    expect(parallelPlan(job(0.5), { threads: 16, memoryBytes: 64 * gb }, null, k4).slots).toBe(1);
+    expect(
+      parallelPlan(job(18, false), { threads: 16, memoryBytes: 64 * gb }, null, k4).slots,
+    ).toBe(1);
+  });
+
+  it('keeps hardware encoding two at once, pieces no shorter than half a minute', () => {
+    const vt = { kind: 'videotoolbox' as const, device: null, decode: true };
+    expect(parallelPlan(job(18), { threads: 16, memoryBytes: 64 * gb }, vt, k4)).toEqual({
+      slots: 2,
+      pieces: 4,
+      threads: 8,
+    });
+    expect(parallelPlan(job(1.2), { threads: 16, memoryBytes: 64 * gb }, vt, k4).pieces).toBe(2);
   });
 });
 
@@ -148,6 +271,19 @@ describe('its ffmpeg', () => {
     expect(await findTools(null, { HOMEBREW_PREFIX: prefix }, 'darwin')).toEqual({
       ffmpeg: join(prefix, 'opt/ffmpeg-full/bin/ffmpeg'),
       ffprobe: join(prefix, 'opt/ffmpeg-full/bin/ffprobe'),
+    });
+  });
+
+  it('is the program’s own, beside it, before any other', async () => {
+    const prefix = homebrew();
+    const own = join(prefix, 'opt/ffmpeg-full/bin');
+    expect(await findTools(null, {}, 'linux', own)).toEqual({
+      ffmpeg: join(own, 'ffmpeg'),
+      ffprobe: join(own, 'ffprobe'),
+    });
+    expect(await findTools(null, {}, 'linux', '/nowhere')).toEqual({
+      ffmpeg: 'ffmpeg',
+      ffprobe: 'ffprobe',
     });
   });
 

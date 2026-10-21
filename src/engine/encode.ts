@@ -1,11 +1,13 @@
-import type {
-  EncoderSpeed,
-  FrameRate,
-  ProresProfile,
-  RenderEncoder,
-  RenderJob,
-  RenderSettings,
-} from '../job.ts';
+import type { EncoderSpeed, FrameRate, ProresProfile, RenderJob, RenderSettings } from '../job.ts';
+import {
+  type Hardware,
+  hardwareEncoder,
+  hardwareInputArgs,
+  hardwarePixelFormat,
+  hardwareUpload,
+  hardwareVideoArgs,
+  NVENC,
+} from './hardware.ts';
 
 /**
  * A render's encode as ffmpeg arguments: the codec and its rate control, the frame rate, the pixel
@@ -40,29 +42,17 @@ const SVT_PRESETS: Readonly<Record<EncoderSpeed, number>> = {
   veryslow: 2,
 };
 
-/** NVENC's presets (p1 fastest, p7 best) for the speeds x264 and x265 name. */
-const NVENC_PRESETS: Readonly<Record<EncoderSpeed, string>> = {
-  ultrafast: 'p1',
-  superfast: 'p2',
-  veryfast: 'p3',
-  faster: 'p4',
-  fast: 'p4',
-  medium: 'p5',
-  slow: 'p6',
-  slower: 'p7',
-  veryslow: 'p7',
-};
-
-/** The GPU's encoder for each codec it makes; ProRes is the CPU's either way. */
-const NVENC: Readonly<Record<'h264' | 'hevc' | 'av1', string>> = {
-  h264: 'h264_nvenc',
-  hevc: 'hevc_nvenc',
-  av1: 'av1_nvenc',
-};
-
-/** Whether a render's settings are made on the GPU when it's asked to: all but ProRes. */
-export function gpuEncodes(settings: RenderSettings): boolean {
-  return settings.codec !== 'prores';
+/**
+ * Where a job is encoded: on `hardware` (NVENC, subs.rocks's GPU machines', unless the machine
+ * says which it has) when the job asks for it and that hardware makes its codec; else null, the
+ * CPU's encoders.
+ */
+export function encoderOf(
+  job: Pick<RenderJob, 'encoder' | 'settings' | 'crf' | 'speed' | 'audioKbps' | 'width' | 'height'>,
+  hardware: Hardware = NVENC,
+): Hardware | null {
+  if (job.encoder !== 'gpu') return null;
+  return hardwareEncoder(hardware.kind, settingsOf(job).codec) ? hardware : null;
 }
 
 /** prores_ks's profile numbers. */
@@ -78,7 +68,9 @@ const PRORES: Readonly<Record<ProresProfile, number>> = {
  * The settings a job encodes by: its own, or, from a server older than settings, the fields it
  * always carries, which were H.264 at a constant quality.
  */
-export function settingsOf(job: RenderJob): RenderSettings {
+export function settingsOf(
+  job: Pick<RenderJob, 'settings' | 'crf' | 'speed' | 'audioKbps' | 'width' | 'height'>,
+): RenderSettings {
   if (job.settings) return job.settings;
   return {
     codec: 'h264',
@@ -95,21 +87,33 @@ export function settingsOf(job: RenderJob): RenderSettings {
 }
 
 /**
- * The frames' pixel format: 4:2:0 at 8 or 10 bits; ProRes 4:2:2, or 4:4:4 for 4444. NVENC takes
- * 10 bits as P010.
+ * The frames' pixel format: 4:2:0 at 8 or 10 bits; ProRes 4:2:2, or 4:4:4 for 4444; on hardware,
+ * as it takes them (`hardwarePixelFormat`).
  */
-export function pixelFormat(settings: RenderSettings, encoder: RenderEncoder = 'cpu'): string {
+export function pixelFormat(settings: RenderSettings, on: Hardware | null = null): string {
+  if (on) return hardwarePixelFormat(on.kind, settings);
   if (settings.codec === 'prores') {
     return settings.proresProfile === '4444' ? 'yuv444p10le' : 'yuv422p10le';
   }
   const tenBit = settings.tenBit && settings.codec !== 'h264';
-  if (encoder === 'gpu') return tenBit ? 'p010le' : 'yuv420p';
   return tenBit ? 'yuv420p10le' : 'yuv420p';
 }
 
-/** What reads the original: on the GPU, its decoder (frames come back for the filters). */
-export function decodeArgs(settings: RenderSettings, encoder: RenderEncoder = 'cpu'): string[] {
-  return encoder === 'gpu' && gpuEncodes(settings) ? ['-hwaccel', 'cuda'] : [];
+/** The filters that end a render's: its pixel format, then on to the hardware where it goes. */
+export function formatFilters(settings: RenderSettings, on: Hardware | null = null): string[] {
+  return [`format=${pixelFormat(settings, on)}`, ...(on ? hardwareUpload(on.kind) : [])];
+}
+
+/**
+ * What reads the original: on hardware, its device and decoder (frames come back for the
+ * subtitles; ffmpeg decodes on the CPU what the hardware can't); and, when given, how many threads
+ * decoding on the CPU and the filters take, which otherwise size themselves by the host's
+ * processors, however many a container or a render's share of the machine may use.
+ */
+export function decodeArgs(on: Hardware | null = null, threads: number | null = null): string[] {
+  const limit =
+    threads === null ? [] : ['-filter_threads', String(threads), '-threads', String(threads)];
+  return [...limit, ...(on ? hardwareInputArgs(on) : [])];
 }
 
 /** The frame rate filter, when the render changes it. */
@@ -168,69 +172,23 @@ function keyframeArgs(seconds: number | null, offset: number): string[] {
 }
 
 /**
- * NVENC's rate control: a constant quality as its `-cq` (its scale near x264's CRF), and bitrates
- * by its own modes, capped as the CPU's are.
- */
-function nvencRateArgs(settings: RenderSettings): string[] {
-  const { rate } = settings;
-  if (rate.mode === 'crf') {
-    const cap = rate.maxKbps;
-    return [
-      '-rc',
-      'vbr',
-      '-cq',
-      String(rate.crf),
-      '-b:v',
-      '0',
-      ...(cap === null ? [] : ['-maxrate', kbps(cap), '-bufsize', kbps(cap * 2)]),
-    ];
-  }
-  if (rate.mode === 'cbr') {
-    const k = kbps(rate.kbps);
-    return ['-rc', 'cbr', '-b:v', k, '-maxrate', k, '-bufsize', k];
-  }
-  return [
-    '-rc',
-    'vbr',
-    '-b:v',
-    kbps(rate.kbps),
-    '-maxrate',
-    kbps(rate.maxKbps),
-    '-bufsize',
-    kbps(rate.maxKbps * 2),
-  ];
-}
-
-/** The GPU's encode: NVENC at the speed's preset, tuned for quality. */
-function nvencArgs(settings: RenderSettings, keyframes: string[]): string[] {
-  const codec = settings.codec === 'prores' ? 'hevc' : settings.codec;
-  const tenBit = settings.tenBit && codec !== 'h264';
-  return [
-    '-c:v',
-    NVENC[codec],
-    '-preset',
-    NVENC_PRESETS[settings.speed],
-    '-tune',
-    'hq',
-    ...nvencRateArgs(settings),
-    ...(codec === 'h264' ? ['-profile:v', 'high'] : []),
-    ...(codec === 'hevc' ? ['-profile:v', tenBit ? 'main10' : 'main', '-tag:v', 'hvc1'] : []),
-    ...keyframes,
-  ];
-}
-
-/**
- * The video encoder and its settings; `offset`, a piece's start in the render, in seconds. On the
- * GPU, NVENC for all but ProRes.
+ * The video encoder and its settings; `offset`, a piece's start in the render, in seconds. On
+ * hardware, its encoder (`hardwareVideoArgs`); on the CPU, `threads` at most when given (a machine
+ * encoding several pieces at once shares its threads among them), else as many as it has.
  */
 export function videoArgs(
   settings: RenderSettings,
   offset = 0,
-  encoder: RenderEncoder = 'cpu',
+  on: Hardware | null = null,
+  threads: number | null = null,
 ): string[] {
   const keyframes = keyframeArgs(settings.keyframeSeconds, offset);
-  if (encoder === 'gpu' && gpuEncodes(settings)) return nvencArgs(settings, keyframes);
+  if (on) return hardwareVideoArgs(on.kind, settings, keyframes);
   const { codec, rate, speed } = settings;
+  const limit = threads === null ? [] : ['-threads', String(threads)];
+  // x264 runs half as many threads again as it's given processors, its frame threads waiting on
+  // each other otherwise: as it would itself.
+  const x264 = threads === null ? [] : ['-threads', String(Math.ceil(threads * 1.5))];
   if (codec === 'prores') {
     return [
       '-c:v',
@@ -239,6 +197,7 @@ export function videoArgs(
       String(PRORES[settings.proresProfile]),
       '-vendor',
       'apl0',
+      ...limit,
     ];
   }
   if (codec === 'h264') {
@@ -251,10 +210,17 @@ export function videoArgs(
       ...(rate.mode === 'cbr' ? ['-x264-params', 'nal-hrd=cbr'] : []),
       '-profile:v',
       'high',
+      ...x264,
       ...keyframes,
     ];
   }
   if (codec === 'hevc') {
+    // x265 runs a pool of threads of its own: `pools` sizes it.
+    const x265 = [
+      'log-level=error',
+      ...(rate.mode === 'cbr' ? ['strict-cbr=1'] : []),
+      ...(threads === null ? [] : [`pools=${threads}`]),
+    ];
     return [
       '-c:v',
       'libx265',
@@ -262,15 +228,18 @@ export function videoArgs(
       speed,
       ...rateArgs(settings),
       '-x265-params',
-      rate.mode === 'cbr' ? 'log-level=error:strict-cbr=1' : 'log-level=error',
+      x265.join(':'),
       // Apple's players want HEVC in MP4 tagged `hvc1`.
       '-tag:v',
       'hvc1',
       ...keyframes,
     ];
   }
-  // SVT-AV1: rc 1 is VBR; CBR needs its low-delay structure.
-  const svt = rate.mode === 'vbr' ? ['rc=1'] : rate.mode === 'cbr' ? ['rc=2', 'pred-struct=1'] : [];
+  // SVT-AV1: rc 1 is VBR; CBR needs its low-delay structure; `lp`, the threads it runs.
+  const svt = [
+    ...(rate.mode === 'vbr' ? ['rc=1'] : rate.mode === 'cbr' ? ['rc=2', 'pred-struct=1'] : []),
+    ...(threads === null ? [] : [`lp=${threads}`]),
+  ];
   return [
     '-c:v',
     'libsvtav1',

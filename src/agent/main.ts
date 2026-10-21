@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { access, constants } from 'node:fs/promises';
+import { release } from 'node:os';
 import { ENGINE_VERSION } from '../job.ts';
 import { NODE_PROTOCOL, NodeSelf, RegisterNodeResult } from '../protocol.ts';
 import { NODE_VERSION } from '../version.ts';
 import { call, Refused, Unreachable } from './api.ts';
 import { jobProcess } from './job-process.ts';
-import { describeMachine, encodersLine, machineLine } from './machine.ts';
+import { type Described, describeMachine, encodersLine, machineLine } from './machine.ts';
 import { type Options, parseOptions, USAGE, UsageError } from './options.ts';
 import { Output, size } from './output.ts';
 import { Session } from './session.ts';
@@ -49,8 +50,28 @@ async function machineOf(options: Options, store: Store, tools: Tools, log: Outp
   const { machine } = described;
   log.ok(`ffmpeg ${machine.ffmpeg} · ${encodersLine(machine)}`);
   log.ok(machineLine(machine));
+  const hardware = hardwareLine(described);
+  if (hardware?.ok) log.ok(hardware.text);
   for (const note of described.notes) log.info(note);
-  return machine;
+  return described;
+}
+
+/** Its video hardware in a line, or what would give it some; null when there's nothing to say. */
+function hardwareLine(described: Described): { ok: boolean; text: string } | null {
+  const found = described.hardware;
+  if (found) {
+    const where = found.hardware.kind === 'videotoolbox' ? 'media engines' : 'video encoders';
+    const decode = found.hardware.decode ? '' : ' (decoding on the CPU)';
+    return { ok: true, text: `Encodes on ${found.name}'s ${where}${decode}` };
+  }
+  // A container sees a GPU only when it's given one; Docker Desktop's (a Mac's, Windows's) can't be.
+  if (described.machine.container && !/linuxkit|microsoft/i.test(release())) {
+    return {
+      ok: false,
+      text: 'Encoding on the CPU. To encode on the graphics card, give the container it: --gpus all (NVIDIA), --device /dev/dri (Intel, AMD)',
+    };
+  }
+  return null;
 }
 
 async function start(options: Options, log: Output): Promise<number> {
@@ -63,8 +84,9 @@ async function start(options: Options, log: Output): Promise<number> {
     return 1;
   }
   const tools = await findTools(options.ffmpeg, process.env);
-  const machine = await machineOf(options, store, tools, log);
-  if (!machine) return 1;
+  const described = await machineOf(options, store, tools, log);
+  if (!described) return 1;
+  const { machine } = described;
   let credential = await store.credential();
   if (credential && credential.server !== options.server) {
     log.error(
@@ -101,7 +123,15 @@ async function start(options: Options, log: Output): Promise<number> {
       return 1;
     }
   }
-  const session = new Session({ server: options.server, credential, store, log, machine, tools });
+  const session = new Session({
+    server: options.server,
+    credential,
+    store,
+    log,
+    machine,
+    tools,
+    hardware: described.hardware?.hardware ?? null,
+  });
   let asked = 0;
   const stop = (signal: NodeJS.Signals) => {
     asked += 1;
@@ -167,6 +197,9 @@ async function doctor(options: Options, log: Output): Promise<number> {
     const where = tools.ffmpeg === 'ffmpeg' ? '' : ` (${tools.ffmpeg})`;
     log.ok(`ffmpeg ${machine.ffmpeg}${where} with libass · ${encodersLine(machine)}`);
     log.ok(machineLine(machine));
+    const hardware = hardwareLine(described);
+    if (hardware?.ok) log.ok(hardware.text);
+    else if (hardware) log.info(hardware.text);
     if (machine.diskBytes !== null) {
       const free = machine.diskBytes;
       const say = free < 20e9 ? log.warn.bind(log) : log.ok.bind(log);

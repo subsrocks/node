@@ -3,6 +3,8 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { isSea } from 'node:sea';
+import type { Hardware } from '../engine/hardware.ts';
+import type { MachineBudget } from '../engine/parallel.ts';
 import { EngineError, type JobFailure, type ProgressReport, RenderResult } from '../job.ts';
 import type { NodeJob, NodeJobOutcome } from '../protocol.ts';
 import { syncFonts } from './fonts.ts';
@@ -20,11 +22,20 @@ import type { Tools } from './tools.ts';
 /** What the job's process says (`job-process.ts`). */
 export type FromJob =
   | ({ type: 'progress' } & ProgressReport)
+  | { type: 'pieces'; pieces: number; slots: number }
   | { type: 'done'; result: unknown }
   | { type: 'failed'; error: JobFailure };
 
-/** What it's told: the job, its files named as the job names them. */
-export type ToJob = { kind: 'render'; input: unknown };
+/**
+ * What it's told: the job, its files named as the job names them, and the machine it runs on: its
+ * video hardware (as tried at start) and the threads and memory it may use.
+ */
+export type ToJob = {
+  kind: 'render';
+  input: unknown;
+  hardware: Hardware | null;
+  budget: MachineBudget;
+};
 
 export type RunningJob = {
   readonly id: string;
@@ -61,6 +72,9 @@ export function startJob(
     log: Output;
     /** The ffmpeg and ffprobe the engine runs. */
     tools: Tools;
+    /** Its video hardware, and what it may use. */
+    hardware: Hardware | null;
+    budget: MachineBudget;
     onProgress: (progress: ProgressReport) => void;
     /** How it starts a job's process: this program again (`__job`), unless told otherwise. */
     command?: { file: string; args: string[] };
@@ -121,6 +135,8 @@ export function startJob(
         process_.on('message', (raw: FromJob) => {
           if (raw.type === 'progress') {
             context.onProgress({ fraction: raw.fraction, remainingMs: raw.remainingMs });
+          } else if (raw.type === 'pieces') {
+            log.info(`In ${raw.pieces} pieces, ${raw.slots} at once`);
           } else if (raw.type === 'done') {
             const result = RenderResult.safeParse(raw.result);
             outcome = result.success
@@ -147,7 +163,12 @@ export function startJob(
             resolve(failed(`the render's process ${how}`, true, started));
           }
         });
-        const message: ToJob = { kind: job.kind, input: job.input };
+        const message: ToJob = {
+          kind: job.kind,
+          input: job.input,
+          hardware: context.hardware,
+          budget: context.budget,
+        };
         process_.send(message);
         if (stopped) kill();
       });

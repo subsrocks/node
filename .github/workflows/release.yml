@@ -55,8 +55,12 @@ jobs:
           tags: ${{ steps.version.outputs.tags }}
           build-args: IMAGES=mirror.gcr.io/library
 
+  ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
   programs:
     # Built, installed and checked on each platform (programs.yml), as CI does.
+    needs: [ffmpeg]
     uses: ./.github/workflows/programs.yml
 
   release:
@@ -71,9 +75,16 @@ jobs:
           pattern: subs-node-*
           path: out
           merge-multiple: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # The sources the macOS program's ffmpeg is built from, as the GPL asks they go with it.
+      - run: |
+          node scripts/ffmpeg.ts --sources "$RUNNER_TEMP/ffmpeg-sources"
+          tar -cf out/ffmpeg-sources.tar -C "$RUNNER_TEMP" ffmpeg-sources
       - run: |
           cp scripts/install.sh out/
-          cd out && sha256sum ./*.tar.gz install.sh | sed 's# \./# #' > SHA256SUMS
+          cd out && sha256sum ./*.tar.gz ./*.tar install.sh | sed 's# \./# #' > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |

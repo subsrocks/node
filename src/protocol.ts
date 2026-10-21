@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import { JobFailure, RenderJob, RenderResult, VideoCodec } from './job.ts';
+import {
+  HardwareFeature,
+  HardwareKind,
+  JobFailure,
+  RenderJob,
+  RenderResult,
+  VideoCodec,
+} from './job.ts';
 
 /**
  * How a node and subs.rocks talk. A node registers once with a token from its workspace's
@@ -53,7 +60,7 @@ export const NodeMachine = z.object({
     threads: z.number().int().positive().max(4096),
   }),
   memoryBytes: z.number().int().nonnegative(),
-  /** Its NVIDIA GPUs, when there are any it can use. */
+  /** Its graphics cards (NVIDIA's, or Intel's and AMD's it encodes on), when there are any. */
   gpus: z
     .array(
       z.object({
@@ -63,13 +70,26 @@ export const NodeMachine = z.object({
     )
     .max(16),
   /**
-   * The codecs it encodes, on its CPU, and on its GPU (NVENC, each tried once at start). The GPU's
-   * are empty when it has none, or was told not to use it (`--gpu off`).
+   * The codecs it encodes, on its CPU, and on its video hardware (`hardware`; each tried at
+   * start). The hardware's are empty when it has none, or was told not to use it (`--gpu off`).
    */
   encoders: z.object({
     cpu: z.array(VideoCodec).max(4),
     gpu: z.array(VideoCodec).max(4),
   }),
+  /**
+   * Its video hardware, when it encodes on some: which kind, what it's called, and for each codec
+   * it encodes there, what of a render's settings it was seen to make. Absent from nodes before
+   * 1.1, whose hardware was an NVIDIA GPU's and made everything it encoded.
+   */
+  hardware: z
+    .object({
+      kind: HardwareKind,
+      name: z.string().max(120),
+      features: z.partialRecord(VideoCodec, z.array(HardwareFeature).max(8)),
+    })
+    .nullable()
+    .optional(),
   /** Its ffmpeg's version, as `ffmpeg -version` says it. */
   ffmpeg: z.string().max(80),
   /** Free space where it works, when it said hello; null when it couldn't tell. */

@@ -1,3 +1,5 @@
+import type { Hardware } from '../engine/hardware.ts';
+import type { MachineBudget } from '../engine/parallel.ts';
 import { ENGINE_VERSION, type RenderJob } from '../job.ts';
 import {
   NODE_CLOSE,
@@ -65,8 +67,11 @@ export function newer(a: string, b: string): boolean {
   return false;
 }
 
-/** A render's job in a few words: `12:04 of 3840×2160 → H.265 on the GPU`. */
-export function jobLine(input: RenderJob): string {
+/**
+ * A render's job in a few words: `12:04 at 3840×2160 → H.265 on the GPU` (`on`, where this
+ * machine's hardware encodes: the GPU, or a Mac's media engine).
+ */
+export function jobLine(input: RenderJob, on = 'the GPU'): string {
   const total = Math.round(input.durationMs / 1000);
   const length = `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
   const settings = input.settings;
@@ -74,7 +79,7 @@ export function jobLine(input: RenderJob): string {
   const codec = { h264: 'H.264', hevc: 'H.265', av1: 'AV1', prores: 'ProRes' }[
     settings?.codec ?? 'h264'
   ];
-  return `${length} at ${frame} → ${codec}${input.encoder === 'gpu' ? ' on the GPU' : ''}`;
+  return `${length} at ${frame} → ${codec}${input.encoder === 'gpu' ? ` on ${on}` : ''}`;
 }
 
 export class Session {
@@ -84,6 +89,9 @@ export class Session {
   private readonly log: Output;
   private readonly machine: NodeMachine;
   private readonly tools: Tools;
+  /** Its video hardware, and what it may use, which each render is told. */
+  private readonly hardware: Hardware | null;
+  private readonly budget: MachineBudget;
   private socket: WebSocket | null = null;
   private job: RunningJob | null = null;
   /** The job someone stopped: its end isn't reported. */
@@ -106,6 +114,7 @@ export class Session {
     log: Output;
     machine: NodeMachine;
     tools: Tools;
+    hardware: Hardware | null;
   }) {
     this.server = context.server;
     this.credential = context.credential;
@@ -113,6 +122,11 @@ export class Session {
     this.log = context.log;
     this.machine = context.machine;
     this.tools = context.tools;
+    this.hardware = context.hardware;
+    this.budget = {
+      threads: context.machine.cpu.threads,
+      memoryBytes: context.machine.memoryBytes,
+    };
   }
 
   /** Runs until the node should stop, and says why. */
@@ -331,13 +345,18 @@ export class Session {
       this.send({ type: 'ended', job: job.id, outcome: { state: 'released', ms: 0 } });
       return;
     }
-    const line = jobLine(job.input);
+    const line = jobLine(
+      job.input,
+      this.hardware?.kind === 'videotoolbox' ? 'the media engine' : 'the GPU',
+    );
     this.log.info(`Rendering ${line}`);
     const running = startJob(job, {
       server: this.server,
       store: this.store,
       log: this.log,
       tools: this.tools,
+      hardware: this.hardware,
+      budget: this.budget,
       onProgress: ({ fraction, remainingMs }) =>
         this.log.progress('Rendering', fraction, remainingMs),
     });

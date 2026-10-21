@@ -153,6 +153,35 @@ export const RenderSettings = z
   });
 export type RenderSettings = z.infer<typeof RenderSettings>;
 
+/**
+ * The video hardware a render can be encoded on: NVIDIA's NVENC, Apple's VideoToolbox (Apple
+ * silicon's media engines, Quick Sync on an Intel Mac) and VA-API (Intel's and AMD's graphics on
+ * Linux). A job asks only for the machine's hardware (`encoder: 'gpu'`); the machine knows which it
+ * has.
+ */
+export const HARDWARE_KINDS = ['nvenc', 'videotoolbox', 'vaapi'] as const;
+export const HardwareKind = z.enum(HARDWARE_KINDS);
+export type HardwareKind = z.infer<typeof HardwareKind>;
+
+/**
+ * What a render's settings ask of an encoder besides its codec, which a machine's hardware may not
+ * do: a constant quality (`crf`), one with a ceiling (`capped`), an average bitrate with a ceiling
+ * (`vbr`), a constant bitrate (`cbr`), 10-bit colour, and ProRes 4444. A node tries each on its
+ * hardware when it starts, and subs.rocks sends a render there only when it can do all it asks.
+ */
+export const HARDWARE_FEATURES = ['crf', 'capped', 'vbr', 'cbr', 'tenBit', 'prores4444'] as const;
+export const HardwareFeature = z.enum(HARDWARE_FEATURES);
+export type HardwareFeature = z.infer<typeof HardwareFeature>;
+
+/** What `settings` ask of the hardware encoding them (`HARDWARE_FEATURES`). */
+export function featuresOf(settings: RenderSettings): HardwareFeature[] {
+  if (settings.codec === 'prores') return settings.proresProfile === '4444' ? ['prores4444'] : [];
+  const { rate } = settings;
+  const mode: HardwareFeature =
+    rate.mode === 'crf' ? (rate.maxKbps === null ? 'crf' : 'capped') : rate.mode;
+  return settings.tenBit && settings.codec !== 'h264' ? [mode, 'tenBit'] : [mode];
+}
+
 /** A file a job reads or writes, by its name in storage. */
 export const ObjectRef = z.object({ key: z.string().min(1).max(512) });
 export type ObjectRef = z.infer<typeof ObjectRef>;
@@ -209,8 +238,9 @@ export const RenderJob = z.object({
     .max(200)
     .optional(),
   /**
-   * What encodes it: the CPU's encoders, or an NVIDIA GPU's (NVENC, decoding on the GPU too), the
-   * rest of the render alike. Absent, the CPU's.
+   * What encodes it: the CPU's encoders, or the machine's video hardware (`HARDWARE_KINDS`:
+   * NVENC on subs.rocks's GPU machines; on a node, whichever it has), decoding there too where it
+   * can, the rest of the render alike. Absent, the CPU's.
    */
   encoder: z.enum(['cpu', 'gpu']).optional(),
 });
