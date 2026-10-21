@@ -1,0 +1,43 @@
+{
+  "name": "@subsrocks/node",
+  "version": "1.0.0",
+  "description": "Render subs.rocks videos on machines of your own.",
+  "license": "Apache-2.0",
+  "homepage": "https://subs.rocks/docs/machines",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/subsrocks/node.git"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "subs-node": "./dist/subs-node.mjs"
+  },
+  "exports": {
+    "./job": "./src/job.ts",
+    "./protocol": "./src/protocol.ts",
+    "./version": "./src/version.ts",
+    "./engine/*": "./src/engine/*.ts"
+  },
+  "scripts": {
+    "start": "node src/agent/main.ts",
+    "build": "node scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome ci ."
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "esbuild": "0.28.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "@biomejs/biome": "2.5.14"
+  },
+  "packageManager": "pnpm@12.4.1"
+}

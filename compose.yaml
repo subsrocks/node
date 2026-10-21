@@ -1,0 +1,21 @@
+# The subs.rocks node with Docker Compose: `SUBS_TOKEN=sr_reg_… docker compose up -d`.
+# The token is used once, to join; the `data` volume keeps the machine's place after that.
+services:
+  node:
+    image: ghcr.io/subsrocks/node:1
+    restart: unless-stopped
+    environment:
+      SUBS_TOKEN: ${SUBS_TOKEN:-}
+      # SUBS_NAME: Edit bay
+    volumes:
+      - data:/data
+    # With an NVIDIA graphics card (and NVIDIA's Container Toolkit), renders encode on it:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu, video, compute, utility]
+volumes:
+  data:

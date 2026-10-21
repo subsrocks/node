@@ -1,0 +1,3 @@
+# One package; esbuild runs its install script for its own binary.
+allowBuilds:
+  esbuild: true
