@@ -34,6 +34,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - run: docker build -t subs-node .
+      # From Google's copy of Docker's images when AWS's turns this runner away (Dockerfile).
+      - run: |
+          docker build -t subs-node . ||
+            docker build --build-arg IMAGES=mirror.gcr.io/library -t subs-node .
       - run: docker run --rm subs-node version
       - run: docker run --rm subs-node doctor --url https://subs.rocks

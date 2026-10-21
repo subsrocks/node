@@ -9,9 +9,11 @@
 # Add `--gpus all` (with NVIDIA's Container Toolkit) to encode on the machine's NVIDIA GPU.
 #
 # Docker's official images from AWS's public copy of them, not Docker Hub, whose pull limits fail
-# builds; same images, same tags.
-ARG NODE_IMAGE=public.ecr.aws/docker/library/node:24-trixie-slim
-ARG RUNTIME_IMAGE=public.ecr.aws/docker/library/debian:trixie-slim
+# builds; same images, same tags. AWS limits what each address pulls too, and CI runners share
+# theirs: `--build-arg IMAGES=mirror.gcr.io/library` builds from Google's copy instead.
+ARG IMAGES=public.ecr.aws/docker/library
+ARG NODE_IMAGE=${IMAGES}/node:24-trixie-slim
+ARG RUNTIME_IMAGE=${IMAGES}/debian:trixie-slim
 
 FROM ${NODE_IMAGE} AS build
 WORKDIR /node
