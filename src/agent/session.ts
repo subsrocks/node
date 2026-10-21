@@ -16,6 +16,7 @@ import { call, headers, Refused, Unreachable } from './api.ts';
 import { duration, type Output, size } from './output.ts';
 import { type RunningJob, startJob } from './runner.ts';
 import type { Credential, Pending, Store } from './store.ts';
+import type { Tools } from './tools.ts';
 
 /**
  * The node at work: connected to subs.rocks, it takes renders one at a time, says how each
@@ -82,6 +83,7 @@ export class Session {
   private readonly store: Store;
   private readonly log: Output;
   private readonly machine: NodeMachine;
+  private readonly tools: Tools;
   private socket: WebSocket | null = null;
   private job: RunningJob | null = null;
   /** The job someone stopped: its end isn't reported. */
@@ -103,12 +105,14 @@ export class Session {
     store: Store;
     log: Output;
     machine: NodeMachine;
+    tools: Tools;
   }) {
     this.server = context.server;
     this.credential = context.credential;
     this.store = context.store;
     this.log = context.log;
     this.machine = context.machine;
+    this.tools = context.tools;
   }
 
   /** Runs until the node should stop, and says why. */
@@ -333,6 +337,7 @@ export class Session {
       server: this.server,
       store: this.store,
       log: this.log,
+      tools: this.tools,
       onProgress: ({ fraction, remainingMs }) =>
         this.log.progress('Rendering', fraction, remainingMs),
     });

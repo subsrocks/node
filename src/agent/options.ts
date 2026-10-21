@@ -25,6 +25,8 @@ export type Options = {
   token: string | null;
   name: string;
   gpu: GpuUse;
+  /** The ffmpeg to render with (its ffprobe beside it), or null to find one (`tools.ts`). */
+  ffmpeg: string | null;
 };
 
 export class UsageError extends Error {}
@@ -43,6 +45,8 @@ Options
   --token <token>   the registration token from Settings › Your machines (SUBS_TOKEN)
   --name <name>     what the workspace calls it; this machine's name if not given (SUBS_NAME)
   --gpu auto|off    encode on an NVIDIA GPU when there is one (SUBS_GPU, default auto)
+  --ffmpeg <path>   the ffmpeg to render with, its ffprobe beside it (SUBS_FFMPEG); found if not
+                    given: Homebrew's ffmpeg-full on a Mac, else the PATH's
   --url <url>       where subs.rocks is (SUBS_URL, default https://subs.rocks)
   --data <dir>      where it keeps its credential, fonts and work (SUBS_DATA)
   --log pretty|json how it writes its log (SUBS_LOG, default pretty)
@@ -101,6 +105,7 @@ export function parseOptions(argv: readonly string[], env: NodeJS.ProcessEnv): O
     token: values.token ?? env['SUBS_TOKEN'] ?? null,
     name: name === '' ? 'machine' : name.slice(0, 60),
     gpu,
+    ffmpeg: values.ffmpeg ?? env['SUBS_FFMPEG'] ?? null,
   };
 }
 
@@ -108,6 +113,7 @@ const OPTIONS = {
   token: { type: 'string' },
   name: { type: 'string' },
   gpu: { type: 'string' },
+  ffmpeg: { type: 'string' },
   url: { type: 'string' },
   data: { type: 'string' },
   log: { type: 'string' },
@@ -125,5 +131,6 @@ function base(env: NodeJS.ProcessEnv): Omit<Options, 'command'> {
     token: null,
     name: hostname(),
     gpu: 'auto',
+    ffmpeg: null,
   };
 }

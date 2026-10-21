@@ -2,7 +2,7 @@
 
 Render your [subs.rocks](https://subs.rocks) videos on machines of your own: a workstation with a fast graphics card, an edit bay that's idle at night, a server in a rack. The node connects to your workspace and waits for renders; each one it makes costs nothing: no render minutes, no credits.
 
-It's the same render engine subs.rocks runs on its own machines, so a render made here is the file subs.rocks would make: the same subtitles, drawn by the same libass with the same fonts, at the preset's settings.
+It's the same render engine subs.rocks runs on its own machines, so a render made here is the file subs.rocks would make: the same subtitles, drawn by the same libass with the same fonts, at the preset's settings (the program on a Mac aside: [see below](#the-program-linux-macos)).
 
 Machines of your own come with the **Team** and **Studio** plans.
 
@@ -30,7 +30,9 @@ curl -fsSL https://github.com/subsrocks/node/releases/latest/download/install.sh
 subs-node start --token sr_reg_…
 ```
 
-The installer puts `subs-node` in `~/.local/bin`, checked against the release's `SHA256SUMS`. The program needs **ffmpeg 7 or newer, built with libass**, on the machine: `brew install ffmpeg` on a Mac, your package manager's on Linux (Debian 13 and Ubuntu 25.04 have 7). `subs-node doctor` checks the machine and says what's missing. To keep it running, use your system's service manager (a systemd unit, a launchd agent) with `subs-node start`.
+The installer puts `subs-node` in `~/.local/bin`, checked against the release's `SHA256SUMS`, then checks the machine and says what it still needs. The program needs **ffmpeg 7 or newer, built with libass**: your package manager's on Linux (Debian 13 and Ubuntu 25.04 have 7); on a Mac with Apple silicon, `brew install ffmpeg-full` (Homebrew's `ffmpeg` has no libass; the node finds `ffmpeg-full`, which Homebrew keeps off the `PATH`, on its own, and `--ffmpeg` names any other). `subs-node doctor` checks the machine again. To keep it running, use your system's service manager (a systemd unit, a launchd agent) with `subs-node start`.
+
+**On a Mac**, libass picks fonts with macOS's font system, so text a template's fonts can't draw (a font it names but doesn't bring, a character its fonts don't have) comes out in the Mac's own fonts, where subs.rocks's renders use their fallback font; `doctor` says so. The Docker image draws exactly as subs.rocks does, and is the easier way on an Intel Mac, where Homebrew builds `ffmpeg-full` from source.
 
 Windows: use Docker Desktop.
 
@@ -78,6 +80,7 @@ subs-node version
 | `--token <token>` | `SUBS_TOKEN` | The registration token, to join the first time |
 | `--name <name>` | `SUBS_NAME` | What the workspace calls it; this machine's host name if not given |
 | `--gpu auto\|off` | `SUBS_GPU` | Encode on an NVIDIA GPU when there is one (`auto`, the default) |
+| `--ffmpeg <path>` | `SUBS_FFMPEG` | The ffmpeg to render with, its ffprobe beside it; found if not given: Homebrew's `ffmpeg-full` on a Mac, else the `PATH`'s |
 | `--data <dir>` | `SUBS_DATA` | Its credential, fonts and work: `/data` in the image, `~/.subs-node` otherwise |
 | `--url <url>` | `SUBS_URL` | Where subs.rocks is (`https://subs.rocks`) |
 | `--log pretty\|json` | `SUBS_LOG` | Lines for people, or one JSON object a line for a log collector |
@@ -98,7 +101,8 @@ The node says in its log when a newer version is out, and a machine too old to t
 
 | What you see | What to do |
 |---|---|
-| `ffmpeg didn't run`, `can't draw subtitles: it needs libass` | Install ffmpeg 7 with libass, or use the Docker image, which has it |
+| `ffmpeg didn't run`, `can't draw subtitles: it needs libass` | Install ffmpeg 7 with libass (on a Mac, `brew install ffmpeg-full`), or use the Docker image, which has it |
+| `libass here picks fonts with macOS's font system` | Text a template's fonts can't draw comes out in the Mac's fonts; for renders exactly like subs.rocks's, use the Docker image |
 | `ffmpeg can't decode on the GPU (CUDA)` | The NVIDIA driver or Container Toolkit isn't set up; renders encode on the processor meanwhile |
 | `That registration token is wrong or has expired` | Tokens last an hour: make a new one with **Add a machine** |
 | `This machine was removed from its workspace` | Add it again from Settings, with a new token |
@@ -114,6 +118,8 @@ node scripts/build.ts --sea      # dist/subs-node-<os>-<arch>, a single executab
 docker build -t subs-node .
 pnpm test                        # needs ffmpeg
 ```
+
+CI runs the tests on Linux (x64 and arm64) and macOS (Apple silicon), each with its ffmpeg, and builds, installs and checks the program on each platform it's released for, as a release does; once a release is out, it installs and runs it from where people get it.
 
 `src/job.ts` and `src/protocol.ts` are what a render is and how a node and subs.rocks talk; `src/engine` makes renders, `src/agent` is `subs-node`.
 

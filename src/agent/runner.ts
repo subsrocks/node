@@ -8,6 +8,7 @@ import type { NodeJob, NodeJobOutcome } from '../protocol.ts';
 import { syncFonts } from './fonts.ts';
 import type { Output } from './output.ts';
 import type { Store } from './store.ts';
+import type { Tools } from './tools.ts';
 
 /**
  * A render on this machine: the built-in fonts made current, then the engine in a process of its
@@ -58,12 +59,14 @@ export function startJob(
     server: string;
     store: Store;
     log: Output;
+    /** The ffmpeg and ffprobe the engine runs. */
+    tools: Tools;
     onProgress: (progress: ProgressReport) => void;
     /** How it starts a job's process: this program again (`__job`), unless told otherwise. */
     command?: { file: string; args: string[] };
   },
 ): RunningJob {
-  const { server, store, log } = context;
+  const { server, store, log, tools } = context;
   const started = Date.now();
   let child: ChildProcess | null = null;
   let stopped: 'release' | 'cancel' | null = null;
@@ -103,6 +106,8 @@ export function startJob(
             MEDIA_IO_TOKEN: job.token,
             WORK_DIR: workDir,
             FONTS_DIR: store.fontsDir,
+            FFMPEG: tools.ffmpeg,
+            FFPROBE: tools.ffprobe,
             // Nothing of the node's own that the job doesn't need.
             SUBS_TOKEN: '',
           },

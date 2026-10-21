@@ -8,6 +8,7 @@ import { afterAll, beforeAll, expect, it, describe as suite } from 'vitest';
 import { Output } from '../src/agent/output.ts';
 import { startJob } from '../src/agent/runner.ts';
 import { Store } from '../src/agent/store.ts';
+import { findTools } from '../src/agent/tools.ts';
 import type { ProgressReport, RenderJob } from '../src/job.ts';
 import type { NodeJob } from '../src/protocol.ts';
 
@@ -25,7 +26,9 @@ function has(tool: string): boolean {
     return false;
   }
 }
-const describe = suite.skipIf(!(has('ffmpeg') && has('ffprobe')));
+// The ffmpeg the node would find: on a Mac, Homebrew's ffmpeg-full.
+const tools = await findTools(null, process.env);
+const describe = suite.skipIf(!(has(tools.ffmpeg) && has(tools.ffprobe)));
 
 const TOKEN = 'node_test.secret';
 const work = mkdtempSync(join(tmpdir(), 'subs-node-runner-'));
@@ -172,6 +175,7 @@ describe('a render on this machine', () => {
       server: origin,
       store,
       log: quiet,
+      tools,
       onProgress: (report) => heard.push(report),
       command,
     });
@@ -183,7 +187,7 @@ describe('a render on this machine', () => {
     const made = join(work, 'made.mp4');
     writeFileSync(made, files.get('render.mp4') ?? Buffer.alloc(0));
     const streams = JSON.parse(
-      execFileSync('ffprobe', ['-v', 'error', '-show_streams', '-of', 'json', made], {
+      execFileSync(tools.ffprobe, ['-v', 'error', '-show_streams', '-of', 'json', made], {
         encoding: 'utf8',
       }),
     ) as { streams: { codec_name: string }[] };
@@ -197,6 +201,7 @@ describe('a render on this machine', () => {
       server: origin,
       store,
       log: quiet,
+      tools,
       onProgress: () => undefined,
       command,
     }).ended;
@@ -210,6 +215,7 @@ describe('a render on this machine', () => {
       server: origin,
       store,
       log: quiet,
+      tools,
       onProgress: () => undefined,
       command,
     });

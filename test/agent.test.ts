@@ -1,10 +1,12 @@
-import { mkdtempSync, statSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  describeMachine,
   encodersLine,
   ffmpegVersion,
+  fontProviderOf,
   listedNames,
   machineLine,
   nvidiaGpus,
@@ -13,6 +15,7 @@ import { parseOptions, serverUrl, UsageError } from '../src/agent/options.ts';
 import { duration, Output, size } from '../src/agent/output.ts';
 import { jobLine, newer } from '../src/agent/session.ts';
 import { Store } from '../src/agent/store.ts';
+import { findTools } from '../src/agent/tools.ts';
 import type { RenderJob } from '../src/job.ts';
 import type { NodeMachine } from '../src/protocol.ts';
 
@@ -34,6 +37,10 @@ describe('the command line', () => {
     });
     expect(parseOptions(['doctor'], {}).command).toBe('doctor');
     expect(parseOptions(['--version'], {}).command).toBe('version');
+    expect(parseOptions([], {}).ffmpeg).toBeNull();
+    expect(parseOptions(['--ffmpeg', '/opt/ffmpeg/bin/ffmpeg'], { SUBS_FFMPEG: 'x' }).ffmpeg).toBe(
+      '/opt/ffmpeg/bin/ffmpeg',
+    );
   });
 
   it('says what’s wrong with what it was given', () => {
@@ -70,6 +77,25 @@ describe('what the machine can do', () => {
     expect(filters.has('ass')).toBe(true);
   });
 
+  it('reads the font system libass picks fonts with', () => {
+    expect(fontProviderOf('[Parsed_ass_0 @ 0x5f] Using font provider fontconfig')).toBe(
+      'fontconfig',
+    );
+    expect(fontProviderOf('[Parsed_ass_0 @ 0x5f] Using font provider coretext')).toBe('coretext');
+    expect(fontProviderOf('[Parsed_ass_0 @ 0x5f] Added subtitle file')).toBeNull();
+  });
+
+  it('says how to get an ffmpeg that renders, on a Mac Homebrew’s with libass', async () => {
+    const missing = { ffmpeg: '/nowhere/ffmpeg', ffprobe: '/nowhere/ffprobe' };
+    const workDir = mkdtempSync(join(tmpdir(), 'subs-node-machine-'));
+    const mac = await describeMachine({ tools: missing, gpu: 'off', workDir, platform: 'darwin' });
+    expect(mac.problems).toEqual([
+      "ffmpeg didn't run (/nowhere/ffmpeg): install it (on a Mac: brew install ffmpeg-full, or run the Docker image)",
+    ]);
+    const linux = await describeMachine({ tools: missing, gpu: 'off', workDir, platform: 'linux' });
+    expect(linux.problems).toEqual(["ffmpeg didn't run (/nowhere/ffmpeg): install it"]);
+  });
+
   it('reads its GPUs from nvidia-smi', () => {
     expect(nvidiaGpus('NVIDIA GeForce RTX 4090, 24564\nNVIDIA L4, 23034\n')).toEqual([
       { name: 'NVIDIA GeForce RTX 4090', memoryBytes: 24564 * 1024 * 1024 },
@@ -93,6 +119,48 @@ describe('what the machine can do', () => {
       'AMD Ryzen 9 7950X · 32 threads · 64 GB · NVIDIA GeForce RTX 4090',
     );
     expect(encodersLine(machine)).toBe('H.264 (GPU) · H.265 (GPU) · AV1 · ProRes');
+  });
+});
+
+describe('its ffmpeg', () => {
+  /** A Homebrew with ffmpeg-full in it, as `brew install ffmpeg-full` leaves it. */
+  function homebrew(): string {
+    const prefix = mkdtempSync(join(tmpdir(), 'subs-node-brew-'));
+    const bin = join(prefix, 'opt/ffmpeg-full/bin');
+    mkdirSync(bin, { recursive: true });
+    for (const tool of ['ffmpeg', 'ffprobe']) {
+      writeFileSync(join(bin, tool), '#!/bin/sh\n');
+      chmodSync(join(bin, tool), 0o755);
+    }
+    return prefix;
+  }
+
+  it('is the one it was told, its ffprobe beside it', async () => {
+    expect(await findTools('/opt/ff/bin/ffmpeg', {})).toEqual({
+      ffmpeg: '/opt/ff/bin/ffmpeg',
+      ffprobe: '/opt/ff/bin/ffprobe',
+    });
+    expect(await findTools('ffmpeg7', {})).toEqual({ ffmpeg: 'ffmpeg7', ffprobe: 'ffprobe' });
+  });
+
+  it('is Homebrew’s ffmpeg-full on a Mac, which isn’t on the PATH', async () => {
+    const prefix = homebrew();
+    expect(await findTools(null, { HOMEBREW_PREFIX: prefix }, 'darwin')).toEqual({
+      ffmpeg: join(prefix, 'opt/ffmpeg-full/bin/ffmpeg'),
+      ffprobe: join(prefix, 'opt/ffmpeg-full/bin/ffprobe'),
+    });
+  });
+
+  it('is the PATH’s elsewhere, or the engine’s own when it’s set', async () => {
+    const prefix = homebrew();
+    expect(await findTools(null, { HOMEBREW_PREFIX: prefix }, 'linux')).toEqual({
+      ffmpeg: 'ffmpeg',
+      ffprobe: 'ffprobe',
+    });
+    expect(await findTools(null, { FFMPEG: '/usr/lib/ffmpeg' }, 'darwin')).toEqual({
+      ffmpeg: '/usr/lib/ffmpeg',
+      ffprobe: 'ffprobe',
+    });
   });
 });
 

@@ -8,12 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    # The engine and the agent, against this runner's ffmpeg: types, lint, tests, and every encode a
-    # preset can ask for.
+  check:
+    # Types and lint.
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -21,16 +24,54 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+
+  test:
+    # The engine and the agent against each platform's ffmpeg, renders end to end, the install
+    # script in its sh, and every encode a preset can ask for: Ubuntu's ffmpeg on Linux, Homebrew's
+    # ffmpeg-full on a Mac (Apple silicon: Homebrew builds nothing for Intel Macs).
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: ffmpeg
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install ffmpeg-full
+            echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
+          else
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
+      - run: ffmpeg -hide_banner -version | head -1
+      - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: node scripts/encoders.ts
 
+  programs:
+    uses: ./.github/workflows/programs.yml
+
   image:
-    # The image builds, and its ffmpeg has everything a render needs.
-    runs-on: ubuntu-24.04
+    # The image builds on each architecture it's released for, and its ffmpeg has everything a
+    # render needs.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7

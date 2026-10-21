@@ -10,17 +10,13 @@ import { type Options, parseOptions, USAGE, UsageError } from './options.ts';
 import { Output, size } from './output.ts';
 import { Session } from './session.ts';
 import { type Credential, Store } from './store.ts';
+import { findTools, type Tools } from './tools.ts';
 
 /**
  * `subs-node`: a machine of a workspace's own that renders its videos. `start` joins the
  * workspace with a registration token the first time, then waits for renders; the rest look
  * after it. See USAGE, and https://subs.rocks/docs/machines.
  */
-
-const TOOLS = {
-  ffmpeg: process.env['FFMPEG'] ?? 'ffmpeg',
-  ffprobe: process.env['FFPROBE'] ?? 'ffprobe',
-};
 
 /** What each refusal means to the person reading the log, and what to do. */
 const REFUSED: Record<string, string> = {
@@ -43,8 +39,8 @@ function explain(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function machineOf(options: Options, store: Store, log: Output) {
-  const described = await describeMachine({ tools: TOOLS, gpu: options.gpu, workDir: store.dir });
+async function machineOf(options: Options, store: Store, tools: Tools, log: Output) {
+  const described = await describeMachine({ tools, gpu: options.gpu, workDir: store.dir });
   for (const problem of described.problems) log.error(problem);
   if (described.problems.length > 0) {
     log.say('\nRun `subs-node doctor` for more, or see https://subs.rocks/docs/machines');
@@ -66,7 +62,8 @@ async function start(options: Options, log: Output): Promise<number> {
     log.error(`Can't write to its data folder ${options.data}: ${explain(error)}`);
     return 1;
   }
-  const machine = await machineOf(options, store, log);
+  const tools = await findTools(options.ffmpeg, process.env);
+  const machine = await machineOf(options, store, tools, log);
   if (!machine) return 1;
   let credential = await store.credential();
   if (credential && credential.server !== options.server) {
@@ -104,7 +101,7 @@ async function start(options: Options, log: Output): Promise<number> {
       return 1;
     }
   }
-  const session = new Session({ server: options.server, credential, store, log, machine });
+  const session = new Session({ server: options.server, credential, store, log, machine, tools });
   let asked = 0;
   const stop = (signal: NodeJS.Signals) => {
     asked += 1;
@@ -158,14 +155,17 @@ async function doctor(options: Options, log: Output): Promise<number> {
     bad += 1;
     log.error(`Data folder ${options.data}: ${explain(error)}`);
   }
-  const described = await describeMachine({ tools: TOOLS, gpu: options.gpu, workDir: store.dir });
+  const tools = await findTools(options.ffmpeg, process.env);
+  const described = await describeMachine({ tools, gpu: options.gpu, workDir: store.dir });
   for (const problem of described.problems) {
     bad += 1;
     log.error(problem);
   }
   if (described.problems.length === 0) {
     const { machine } = described;
-    log.ok(`ffmpeg ${machine.ffmpeg} with libass · ${encodersLine(machine)}`);
+    // Where it is, when it isn't simply the PATH's.
+    const where = tools.ffmpeg === 'ffmpeg' ? '' : ` (${tools.ffmpeg})`;
+    log.ok(`ffmpeg ${machine.ffmpeg}${where} with libass · ${encodersLine(machine)}`);
     log.ok(machineLine(machine));
     if (machine.diskBytes !== null) {
       const free = machine.diskBytes;
@@ -198,7 +198,9 @@ async function doctor(options: Options, log: Output): Promise<number> {
       log.error(explain(error));
     }
   } else {
-    log.info('Hasn’t joined a workspace yet: `subs-node start --token …`');
+    log.info(
+      'Hasn’t joined a workspace yet: `subs-node start --token …`, with a token from Settings › Your machines',
+    );
   }
   log.say(
     bad === 0

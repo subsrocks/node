@@ -1,16 +1,18 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, statfs } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, statfs, writeFile } from 'node:fs/promises';
 import { availableParallelism, cpus, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import type { VideoCodec } from '../job.ts';
 import type { NodeMachine } from '../protocol.ts';
 import type { GpuUse } from './options.ts';
+import type { Tools } from './tools.ts';
 
 /**
  * What this machine can do, found out once at start: its ffmpeg (which must draw subtitles with
  * libass), the encoders it has for each codec, and NVIDIA GPUs it can encode on. Every GPU encoder
  * is tried on a few frames, and CUDA decoding too, since a GPU render decodes there: a driver
- * that's missing or too old shows up here, not halfway through someone's render.
+ * that's missing or too old shows up here, not halfway through someone's render. A line is drawn
+ * too, for the font system libass picks fonts with.
  */
 
 /** Each codec's CPU encoder, and its GPU's (NVENC); ProRes has no GPU encoder. */
@@ -26,20 +28,19 @@ const GPU_ENCODERS: Readonly<Partial<Record<VideoCodec, string>>> = {
   av1: 'av1_nvenc',
 };
 
-export type Tools = { ffmpeg: string; ffprobe: string };
-
-/** A command's output, or null when it couldn't run or failed. */
+/** A command's output (its errors' too, with `stderr`), or null when it couldn't run or failed. */
 export function capture(
   command: string,
   args: readonly string[],
-  timeoutMs = 30_000,
+  options: { cwd?: string; stderr?: boolean; timeoutMs?: number } = {},
 ): Promise<string | null> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(command, args, {
+        cwd: options.cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
       });
     } catch {
       resolve(null);
@@ -47,7 +48,8 @@ export function capture(
     }
     const out: Buffer[] = [];
     child.stdout?.on('data', (chunk: Buffer) => out.push(chunk));
-    child.stderr?.resume();
+    if (options.stderr) child.stderr?.on('data', (chunk: Buffer) => out.push(chunk));
+    else child.stderr?.resume();
     child.on('error', () => resolve(null));
     child.on('close', (code) => resolve(code === 0 ? Buffer.concat(out).toString('utf8') : null));
   });
@@ -144,6 +146,64 @@ async function decodesOnGpu(tools: Tools): Promise<boolean> {
   }
 }
 
+/** The font system libass says it picks fonts with: `fontconfig`, or macOS's `coretext`. */
+export function fontProviderOf(text: string): string | null {
+  return /Using font provider (\w+)/.exec(text)?.[1] ?? null;
+}
+
+/** A line to draw, in a font that isn't there. */
+const LINE = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 64
+PlayResY: 64
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Tahoma,16,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,4,4,4,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Hi
+`;
+
+/** The font system this ffmpeg's libass picks fonts with, from drawing a line as a render does. */
+async function fontProvider(tools: Tools): Promise<string | null> {
+  const dir = await mkdtemp(join(tmpdir(), 'subs-node-ass-'));
+  try {
+    await mkdir(join(dir, 'fonts'));
+    await writeFile(join(dir, 'line.ass'), LINE);
+    const output = await capture(
+      tools.ffmpeg,
+      [
+        '-hide_banner',
+        '-v',
+        'info',
+        '-f',
+        'lavfi',
+        '-i',
+        'color=black:size=64x64:rate=1',
+        '-frames:v',
+        '1',
+        '-vf',
+        'ass=filename=line.ass:fontsdir=fonts',
+        '-f',
+        'null',
+        '-',
+      ],
+      { cwd: dir, stderr: true },
+    );
+    return output === null ? null : fontProviderOf(output);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** A font system, as people know it. */
+const FONT_SYSTEMS: Readonly<Record<string, string>> = {
+  coretext: "macOS's font system",
+  directwrite: "Windows's font system",
+};
+
 export type Described = {
   machine: NodeMachine;
   /** What stops it rendering: no ffmpeg, no libass, no H.264 encoder. */
@@ -158,10 +218,14 @@ export async function describeMachine(options: {
   gpu: GpuUse;
   /** Where it works, for its free space. */
   workDir: string;
+  platform?: NodeJS.Platform;
 }): Promise<Described> {
   const { tools } = options;
   const problems: string[] = [];
   const notes: string[] = [];
+  // Homebrew's ffmpeg has no libass; its ffmpeg-full has, for Apple silicon (Intel Macs build it).
+  const mac = (options.platform ?? process.platform) === 'darwin';
+  const getIt = mac ? ' (on a Mac: brew install ffmpeg-full, or run the Docker image)' : '';
   const [versionText, encoderText, filterText, probeText] = await Promise.all([
     capture(tools.ffmpeg, ['-hide_banner', '-version']),
     capture(tools.ffmpeg, ['-hide_banner', '-encoders']),
@@ -169,12 +233,25 @@ export async function describeMachine(options: {
     capture(tools.ffprobe, ['-hide_banner', '-version']),
   ]);
   const version = versionText === null ? null : ffmpegVersion(versionText);
-  if (versionText === null) problems.push(`ffmpeg didn't run (${tools.ffmpeg}): install it`);
-  if (probeText === null) problems.push(`ffprobe didn't run (${tools.ffprobe}): install it`);
+  if (versionText === null)
+    problems.push(`ffmpeg didn't run (${tools.ffmpeg}): install it${getIt}`);
+  if (versionText !== null && probeText === null) {
+    problems.push(`ffprobe didn't run (${tools.ffprobe}): install it${getIt}`);
+  }
   const encoders = encoderText === null ? new Set<string>() : listedNames(encoderText);
   const filters = filterText === null ? new Set<string>() : listedNames(filterText);
   if (versionText !== null && !filters.has('ass')) {
-    problems.push("this ffmpeg can't draw subtitles: it needs libass (the `ass` filter)");
+    problems.push(`this ffmpeg can't draw subtitles: it needs libass (the \`ass\` filter)${getIt}`);
+  } else if (versionText !== null) {
+    // subs.rocks's renders give libass their fonts alone, through fontconfig; where it asks the
+    // system's fonts too, a font the template doesn't bring, or a character its fonts lack, draws
+    // in one of this machine's.
+    const provider = await fontProvider(tools);
+    if (provider !== null && provider !== 'fontconfig') {
+      notes.push(
+        `libass here picks fonts with ${FONT_SYSTEMS[provider] ?? `the system's (${provider})`}, not a render's fonts alone: a font a template doesn't bring, or a character its fonts lack, can draw unlike subs.rocks's renders (the Docker image draws them exactly)`,
+      );
+    }
   }
   const cpu = (Object.keys(CPU_ENCODERS) as VideoCodec[]).filter((codec) =>
     encoders.has(CPU_ENCODERS[codec]),

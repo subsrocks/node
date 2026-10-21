@@ -2,7 +2,7 @@ name: release
 
 # A version tag (`v1.2.3`, pushed when subs.rocks releases a new version of the node) publishes the
 # image, for amd64 and arm64, and the program for Linux and macOS, with an install script and
-# their checksums.
+# their checksums; then installs and runs them as people will, from where people get them.
 
 on:
   push:
@@ -56,30 +56,8 @@ jobs:
           build-args: IMAGES=mirror.gcr.io/library
 
   programs:
-    # Each platform's single executable, built on that platform.
-    strategy:
-      matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          # Builds single executables (25.5 and newer).
-          node-version: 26
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: node scripts/build.ts --sea
-      - id: name
-        run: echo "name=$(cd dist && ls subs-node-*-* | grep -v '\.')" >> "$GITHUB_OUTPUT"
-      - run: ./dist/${{ steps.name.outputs.name }} version
-      - run: tar -czf "dist/${{ steps.name.outputs.name }}.tar.gz" -C dist "${{ steps.name.outputs.name }}"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.name.outputs.name }}
-          path: dist/${{ steps.name.outputs.name }}.tar.gz
+    # Built, installed and checked on each platform (programs.yml), as CI does.
+    uses: ./.github/workflows/programs.yml
 
   release:
     needs: [image, programs]
@@ -103,3 +81,28 @@ jobs:
           # This version's notes, from the changelog.
           awk -v v="## $version" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
           gh release create "$GITHUB_REF_NAME" out/* --title "subs-node $version" --notes-file notes.md
+
+  published:
+    # The release as people get it: the install line on each platform, and the image on each
+    # architecture.
+    needs: [release]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - name: The install line
+        env:
+          SUBS_NODE_DIR: ${{ runner.temp }}/bin
+        run: |
+          curl -fsSL https://github.com/subsrocks/node/releases/latest/download/install.sh | sh
+          installed="$("$SUBS_NODE_DIR/subs-node" version)"
+          case "$installed" in
+            "${GITHUB_REF_NAME#v} "*) ;;
+            *) echo "::error::installed $installed, not ${GITHUB_REF_NAME#v}"; exit 1 ;;
+          esac
+      - name: The image
+        if: runner.os == 'Linux'
+        run: docker run --rm "ghcr.io/subsrocks/node:${GITHUB_REF_NAME#v}" doctor
