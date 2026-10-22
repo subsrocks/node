@@ -32,7 +32,12 @@ const PARTS_AT_ONCE = 4;
 /** The waits before each new try of a request that failed in a way that may pass. */
 const RETRY_DELAYS_MS: readonly number[] = [1_000, 4_000, 15_000];
 
-export type IoOptions = { partBytes?: number; retryDelaysMs?: readonly number[] };
+export type IoOptions = {
+  partBytes?: number;
+  retryDelaysMs?: readonly number[];
+  /** Bytes moved so far, of how many: a copy's or an upload's, for its progress. */
+  onBytes?: (done: number, total: number) => void;
+};
 
 async function sha256File(path: string): Promise<string> {
   const hash = createHash('sha256');
@@ -40,10 +45,38 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest('hex');
 }
 
-/** A file, or the bytes `start` to `end` (exclusive) of it, as a request body. */
-function fileBody(path: string, range?: { start: number; end: number }): RequestInit {
+/**
+ * A file, or the bytes `start` to `end` (exclusive) of it, as a request body; each chunk's size
+ * told to `onRead` as the request takes it.
+ */
+function fileBody(
+  path: string,
+  range?: { start: number; end: number },
+  onRead?: (bytes: number) => void,
+): RequestInit {
   const stream = createReadStream(path, range && { start: range.start, end: range.end - 1 });
-  return { body: Readable.toWeb(stream) as ReadableStream, duplex: 'half' } as RequestInit;
+  const body = Readable.toWeb(stream) as ReadableStream;
+  if (onRead) stream.on('data', (chunk: Buffer | string) => onRead(chunk.length));
+  return { body, duplex: 'half' } as RequestInit;
+}
+
+/**
+ * An upload's bytes sent so far, told to `onBytes`: a part sent again counts afresh, not twice.
+ * `part(n)` starts part `n`'s count over and returns what counts it.
+ */
+function sentBytes(size: number, onBytes?: IoOptions['onBytes']) {
+  const parts = new Map<number, number>();
+  let sent = 0;
+  return (part: number): ((bytes: number) => void) | undefined => {
+    if (!onBytes) return undefined;
+    sent -= parts.get(part) ?? 0;
+    parts.set(part, 0);
+    return (bytes) => {
+      parts.set(part, (parts.get(part) ?? 0) + bytes);
+      sent += bytes;
+      onBytes(Math.min(sent, size), size);
+    };
+  };
 }
 
 function failureOf(error: unknown): string {
@@ -88,8 +121,9 @@ export async function putFile(
   const delays = options.retryDelaysMs ?? RETRY_DELAYS_MS;
   const { size } = await stat(path);
   const sha256 = await sha256File(path);
+  const counted = sentBytes(size, options.onBytes);
   if (size > partBytes) {
-    await putParts(path, key, mime, size, partBytes, delays);
+    await putParts(path, key, mime, size, partBytes, delays, counted);
   } else {
     await request(`storing ${key}`, delays, () => [
       objectUrl(key),
@@ -100,7 +134,7 @@ export async function putFile(
           'Content-Length': String(size),
           'X-Content-SHA256': sha256,
         },
-        ...fileBody(path),
+        ...fileBody(path, undefined, counted(0)),
       },
     ]);
   }
@@ -118,6 +152,7 @@ async function putParts(
   size: number,
   partBytes: number,
   delays: readonly number[],
+  counted: ReturnType<typeof sentBytes>,
 ): Promise<void> {
   const started = await request(`starting ${key} in parts`, delays, () => [
     objectUrl(key, { uploads: '' }),
@@ -142,7 +177,7 @@ async function putParts(
             {
               method: 'PUT',
               headers: { 'Content-Length': String(end - start) },
-              ...fileBody(path, { start, end }),
+              ...fileBody(path, { start, end }, counted(partNumber)),
             },
           ],
         );
@@ -204,17 +239,44 @@ async function readObject<T>(
   throw new JobError('processing_failed', `reading ${key} failed: ${failure}`, true);
 }
 
-async function save(body: ReadableStream, path: string): Promise<number> {
+/** A response's body written to `path`, each chunk's size told to `onChunk`. Its size. */
+async function save(
+  body: ReadableStream,
+  path: string,
+  onChunk?: (bytes: number) => void,
+): Promise<number> {
   await pipeline(
     Readable.fromWeb(body as import('node:stream/web').ReadableStream),
+    async function* (chunks: AsyncIterable<Buffer>) {
+      for await (const chunk of chunks) {
+        onChunk?.(chunk.length);
+        yield chunk;
+      }
+    },
     createWriteStream(path),
   );
   return (await stat(path)).size;
 }
 
-/** Streams an object to a local file, read again from the start if it breaks off. Its size. */
+/** What tells `onBytes` how much of a response has come, of its `Content-Length`. */
+function received(response: Response, onBytes: IoOptions['onBytes']) {
+  const total = Number(response.headers.get('Content-Length'));
+  if (!onBytes || !(total > 0)) return undefined;
+  let done = 0;
+  return (bytes: number) => {
+    done += bytes;
+    onBytes(Math.min(done, total), total);
+  };
+}
+
+/**
+ * Streams an object to a local file, read again from the start if it breaks off (counted afresh
+ * then). Its size.
+ */
 export function getFile(key: string, path: string, options: IoOptions = {}): Promise<number> {
-  return readObject(key, options, (response) => save(response.body, path));
+  return readObject(key, options, (response) =>
+    save(response.body, path, received(response, options.onBytes)),
+  );
 }
 
 /**
@@ -245,7 +307,7 @@ export async function originalInput(
       log('info', 'original read from storage: no room to copy it', { key, bytes, free });
       return false;
     }
-    await save(response.body, path);
+    await save(response.body, path, received(response, options.onBytes));
     return true;
   });
   return copied ? path : objectUrl(key);

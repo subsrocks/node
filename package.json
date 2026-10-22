@@ -1,6 +1,6 @@
 {
   "name": "@subsrocks/node",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Render subs.rocks videos on machines of your own.",
   "license": "Apache-2.0",
   "homepage": "https://subs.rocks/docs/machines",

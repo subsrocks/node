@@ -134,7 +134,11 @@ export function startJob(
         }
         process_.on('message', (raw: FromJob) => {
           if (raw.type === 'progress') {
-            context.onProgress({ fraction: raw.fraction, remainingMs: raw.remainingMs });
+            context.onProgress({
+              stage: raw.stage,
+              fraction: raw.fraction,
+              remainingMs: raw.remainingMs,
+            });
           } else if (raw.type === 'pieces') {
             log.info(`In ${raw.pieces} pieces, ${raw.slots} at once`);
           } else if (raw.type === 'done') {

@@ -1,7 +1,7 @@
 import { copyFile, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import type { ProgressReport, RenderJob, RenderResult } from '../job.ts';
+import type { ProgressReport, RenderJob, RenderResult, RenderStage, WrittenFile } from '../job.ts';
 import { config } from './config.ts';
 import {
   audioArgs,
@@ -17,7 +17,7 @@ import {
 import { JobError } from './errors.ts';
 import { NETWORK_INPUT, run, seconds } from './ffmpeg.ts';
 import type { Hardware } from './hardware.ts';
-import { objectUrl, originalInput, putFile, putJson } from './io.ts';
+import { type IoOptions, objectUrl, originalInput, putFile, putJson } from './io.ts';
 
 /**
  * What libass draws with where a style's font isn't there or has no glyph: the face subs.rocks's
@@ -83,21 +83,66 @@ async function download(key: string, path: string): Promise<void> {
 }
 
 /**
- * ffmpeg's `-progress` output (blocks of `key=value` lines, two a second) as the share of the
- * output written, handed to `write` every few seconds with an estimate of the time left: one
- * encode's (`push`), or several at once (each its own `stream`, as a render's pieces are), whose
- * outputs add up to the render. Best-effort: a write that fails is skipped, never the encode, and
- * one at a time.
+ * A stage of a render as it goes (`ProgressReport`): the share of it done, handed to `write` every
+ * few seconds with an estimate of the stage's time left once enough of it is behind. Best-effort:
+ * a write that fails is skipped, never the work, and one at a time.
  */
-export class EncodeProgress {
-  private readonly durationMs: number;
+export class StageProgress {
+  private readonly stage: RenderStage;
   private readonly write: (progress: ProgressReport) => Promise<void>;
   private readonly clock: () => number;
   private readonly started: number;
-  /** Output written so far, every stream's, in milliseconds. */
-  private written = 0;
   private lastWrite = Number.NEGATIVE_INFINITY;
   private writing: Promise<void> | null = null;
+
+  constructor(
+    stage: RenderStage,
+    write: (progress: ProgressReport) => Promise<void>,
+    clock: () => number = Date.now,
+  ) {
+    this.stage = stage;
+    this.write = write;
+    this.clock = clock;
+    this.started = clock();
+  }
+
+  /** Says the stage has begun, at once, so whoever watches moves on to it. */
+  begin(): void {
+    this.update(0, true);
+  }
+
+  /** The share of the stage done: written now if it's time to, else left for the next. */
+  update(fraction: number, now = false): void {
+    const at = this.clock();
+    if (this.writing || (!now && at - this.lastWrite < PROGRESS_EVERY_MS)) return;
+    this.lastWrite = at;
+    const elapsed = at - this.started;
+    const remainingMs =
+      fraction >= ESTIMATE_AFTER.fraction && elapsed >= ESTIMATE_AFTER.ms
+        ? Math.round((elapsed * (1 - fraction)) / fraction)
+        : null;
+    this.writing = this.write({ stage: this.stage, fraction, remainingMs })
+      .catch(() => undefined)
+      .finally(() => {
+        this.writing = null;
+      });
+  }
+
+  /** Waits for a write in flight, so none lands after the stage (or the job) is over. */
+  async settle(): Promise<void> {
+    await this.writing;
+  }
+}
+
+/**
+ * ffmpeg's `-progress` output (blocks of `key=value` lines, two a second) as the share of the
+ * output written, the encode's stage: one encode's (`push`), or several at once (each its own
+ * `stream`, as a render's pieces are), whose outputs add up to the render.
+ */
+export class EncodeProgress extends StageProgress {
+  private readonly durationMs: number;
+  /** Output written so far, every stream's, in milliseconds. */
+  private written = 0;
   private readonly single = this.stream();
 
   constructor(
@@ -105,10 +150,8 @@ export class EncodeProgress {
     write: (progress: ProgressReport) => Promise<void>,
     clock: () => number = Date.now,
   ) {
+    super('encoding', write, clock);
     this.durationMs = durationMs;
-    this.write = write;
-    this.clock = clock;
-    this.started = clock();
   }
 
   /** The one encode's output. */
@@ -135,27 +178,37 @@ export class EncodeProgress {
       }
     };
   }
+}
 
-  /** Waits for a write in flight, so none lands after the job is done. */
-  async settle(): Promise<void> {
-    await this.writing;
-  }
+/** Where a render says how far it is: its file in storage (`progress`) and the caller's hook. */
+export type ProgressWrite = (progress: ProgressReport) => Promise<void>;
 
-  private update(fraction: number): void {
-    const now = this.clock();
-    if (this.writing || now - this.lastWrite < PROGRESS_EVERY_MS) return;
-    this.lastWrite = now;
-    const elapsed = now - this.started;
-    const remainingMs =
-      fraction >= ESTIMATE_AFTER.fraction && elapsed >= ESTIMATE_AFTER.ms
-        ? Math.round((elapsed * (1 - fraction)) / fraction)
-        : null;
-    this.writing = this.write({ fraction, remainingMs })
-      .catch(() => undefined)
-      .finally(() => {
-        this.writing = null;
-      });
-  }
+export function progressWriter(
+  file: { key: string } | undefined,
+  onProgress?: (progress: ProgressReport) => void,
+): ProgressWrite | null {
+  if (!file && !onProgress) return null;
+  return async (value) => {
+    onProgress?.(value);
+    if (file) await putJson(file.key, value);
+  };
+}
+
+/**
+ * A stage that moves bytes (a copy, an upload), begun at once: the `IoOptions` that tell it how
+ * far the bytes are, and `settle` for when it's over. Nothing to tell without `write`.
+ */
+export function bytesStage(
+  stage: RenderStage,
+  write: ProgressWrite | null,
+): { io: IoOptions; settle: () => Promise<void> } {
+  if (!write) return { io: {}, settle: async () => undefined };
+  const progress = new StageProgress(stage, write);
+  progress.begin();
+  return {
+    io: { onBytes: (done, total) => progress.update(total > 0 ? Math.min(1, done / total) : 0) },
+    settle: () => progress.settle(),
+  };
 }
 
 /**
@@ -338,25 +391,21 @@ export async function render(
   hooks: RenderHooks = {},
   options: RenderOptions = {},
 ): Promise<RenderResult> {
+  const write = progressWriter(job.progress, hooks.onProgress);
+  // Its fonts and subtitles, and its original copied over: what the encode waits on.
+  const preparing = bytesStage('preparing', write);
   const env = await prepareRender(job, workDir);
   // Its picture and sound read together: from a copy where there's room. A piece reads
   // only the picture, and the render's sound only the sound, which streams well whatever the file.
-  const input = await originalInput(job.input.key, workDir, () => RENDER_SPARE_BYTES);
+  const input = await originalInput(job.input.key, workDir, () => RENDER_SPARE_BYTES, preparing.io);
+  await preparing.settle();
   const on = encoderOf(job, options.hardware);
 
   const settings = settingsOf(job);
   const file = container(settings);
   const out = join(workDir, `render.${file.extension}`);
   const report = new FontReport();
-  const { progress: progressFile } = job;
-  const { onProgress } = hooks;
-  const progress =
-    progressFile || onProgress
-      ? new EncodeProgress(job.durationMs, async (value) => {
-          onProgress?.(value);
-          if (progressFile) await putJson(progressFile.key, value);
-        })
-      : null;
+  const progress = write ? new EncodeProgress(job.durationMs, write) : null;
   await run(
     'ffmpeg',
     [
@@ -401,8 +450,21 @@ export async function render(
   await progress?.settle();
   const probed = await probeOutput(out);
   return {
-    output: await putFile(out, job.output.key, file.mime),
+    output: await saveFile(out, job.output.key, file.mime, write),
     ...probed,
     ...report.finish(),
   };
+}
+
+/** A render's file stored (`putFile`), saying how much of it has gone up as it goes. */
+export async function saveFile(
+  path: string,
+  key: string,
+  mime: string,
+  write: ProgressWrite | null,
+): Promise<WrittenFile> {
+  const saving = bytesStage('saving', write);
+  const written = await putFile(path, key, mime, saving.io);
+  await saving.settle();
+  return written;
 }

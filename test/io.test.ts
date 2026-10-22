@@ -158,6 +158,19 @@ describe('putFile', () => {
     expect(seen.filter((name) => name === 'POST upload')).toHaveLength(1);
   });
 
+  it('says how much has gone up as it goes, a part sent again counted afresh', async () => {
+    const { path } = file('counted.bin', 10_000);
+    failing = [{ match: 'part 3', how: 'drop' }];
+    const told: [number, number][] = [];
+    await putFile(path, 'ws/a/counted', 'video/mp4', {
+      ...fast,
+      partBytes: 3000,
+      onBytes: (done, total) => told.push([done, total]),
+    });
+    expect(told.every(([done, total]) => total === 10_000 && done <= total)).toBe(true);
+    expect(told.at(-1)).toEqual([10_000, 10_000]);
+  });
+
   it('drops the upload and fails to be retried when a part can’t be stored', async () => {
     const { path } = file('refused.bin', 10_000);
     failing = [{ match: 'part 3', how: 403 }];
@@ -184,6 +197,20 @@ describe('originalInput', () => {
     expect(readFileSync(input)).toEqual(bytes);
     // Asked for again after the 503, then copied whole.
     expect(seen.filter((name) => name === 'GET ws/a/original')).toHaveLength(2);
+  });
+
+  it('says how much of the copy has come, counted afresh when it’s asked for again', async () => {
+    store.set('ws/a/original', file('counted-copy.bin', 200_000).bytes);
+    failing = [{ match: 'GET ws/a/original', how: 503 }];
+    const dir = mkdtempSync(join(work, 'job-'));
+    const told: [number, number][] = [];
+    await originalInput('ws/a/original', dir, (size) => size, {
+      ...fast,
+      onBytes: (done, total) => told.push([done, total]),
+    });
+    expect(told.length).toBeGreaterThan(0);
+    expect(told.every(([done, total]) => total === 200_000 && done <= total)).toBe(true);
+    expect(told.at(-1)).toEqual([200_000, 200_000]);
   });
 
   it('reads it from storage as it goes when the disk can’t hold it and what the job writes', async () => {

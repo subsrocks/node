@@ -261,8 +261,19 @@ export const RenderResult = z.object({
 });
 export type RenderResult = z.infer<typeof RenderResult>;
 
-/** How far an encode is, as the engine writes it while it works (`RenderJob.progress`). */
-export type ProgressReport = { fraction: number; remainingMs: number | null };
+/**
+ * What a render is doing: its original being copied to the machine (and the machine making ready),
+ * its frames encoded, its pieces gathered and joined, its file stored.
+ */
+export const RENDER_STAGES = ['preparing', 'encoding', 'joining', 'saving'] as const;
+export type RenderStage = (typeof RENDER_STAGES)[number];
+
+/**
+ * How far a render is, as the engine writes it while it works (`RenderJob.progress`): the stage
+ * it's at, the share of that stage done, and its estimate of that stage's time left. A report with
+ * no stage (an engine before stages) is the encode's.
+ */
+export type ProgressReport = { stage: RenderStage; fraction: number; remainingMs: number | null };
 
 /** The most pieces a render is cut into: four hours of 4K HEVC at about a minute and a half each. */
 export const MAX_RENDER_PIECES = 240;
@@ -327,13 +338,22 @@ export type RenderAudioResult = z.infer<typeof RenderAudioResult>;
  */
 export const RenderJoinJob = z.object({
   pieces: z
-    .array(z.object({ key: z.string().min(1).max(512), frames: z.number().int().positive() }))
+    .array(
+      z.object({
+        key: z.string().min(1).max(512),
+        frames: z.number().int().positive(),
+        /** Its file's size, so gathering the pieces can say how far it is. */
+        bytes: z.number().int().nonnegative().optional(),
+      }),
+    )
     .min(2)
     .max(MAX_RENDER_PIECES),
   audio: ObjectRef.nullable(),
   grid: FrameGrid,
   settings: RenderSettings,
   output: ObjectRef,
+  /** Where the join keeps a `ProgressReport` while it gathers the pieces and stores the file. */
+  progress: ObjectRef.optional(),
 });
 export type RenderJoinJob = z.infer<typeof RenderJoinJob>;
 

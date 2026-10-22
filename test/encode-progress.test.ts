@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EncodeProgress } from '../src/engine/render.ts';
+import { EncodeProgress, StageProgress } from '../src/engine/render.ts';
 import type { ProgressReport } from '../src/job.ts';
 
 /** One `-progress` block, as ffmpeg 7.1 writes it, `doneMs` into the output. */
@@ -29,7 +29,7 @@ describe('encode progress', () => {
     progress.push(block(500));
     await progress.settle();
     // The first block is written at once; too early to estimate.
-    expect(written).toEqual([{ fraction: 500 / 60_000, remainingMs: null }]);
+    expect(written).toEqual([{ stage: 'encoding', fraction: 500 / 60_000, remainingMs: null }]);
 
     advance(2_000);
     progress.push(block(3_000));
@@ -40,7 +40,7 @@ describe('encode progress', () => {
     progress.push(block(6_000));
     await progress.settle();
     // A tenth in 6 s: 54 s to go.
-    expect(written.at(-1)).toEqual({ fraction: 0.1, remainingMs: 54_000 });
+    expect(written.at(-1)).toEqual({ stage: 'encoding', fraction: 0.1, remainingMs: 54_000 });
   });
 
   it('reads blocks split across chunks, and never counts past the end', async () => {
@@ -69,5 +69,31 @@ describe('encode progress', () => {
     progress.push(block(5_000));
     await progress.settle();
     expect(calls).toBe(2);
+  });
+});
+
+describe('a stage’s progress', () => {
+  it('says the stage has begun at once, then how far it is every few seconds', async () => {
+    let now = 0;
+    const written: ProgressReport[] = [];
+    const saving = new StageProgress(
+      'saving',
+      async (value) => {
+        written.push(value);
+      },
+      () => now,
+    );
+    saving.begin();
+    await saving.settle();
+    expect(written).toEqual([{ stage: 'saving', fraction: 0, remainingMs: null }]);
+    now += 1_000;
+    saving.update(0.1);
+    await saving.settle();
+    expect(written).toHaveLength(1);
+    now += 5_000;
+    saving.update(0.25);
+    await saving.settle();
+    // A quarter in 6 s: 18 s to go.
+    expect(written.at(-1)).toEqual({ stage: 'saving', fraction: 0.25, remainingMs: 18_000 });
   });
 });

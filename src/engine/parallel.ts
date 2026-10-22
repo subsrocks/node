@@ -11,7 +11,7 @@ import { planPieces } from '../plan.ts';
 import { container, encoderOf, settingsOf } from './encode.ts';
 import { run } from './ffmpeg.ts';
 import type { Hardware } from './hardware.ts';
-import { objectUrl, originalInput, putFile, putJson } from './io.ts';
+import { objectUrl, originalInput } from './io.ts';
 import { log } from './log.ts';
 import {
   audioFile,
@@ -21,7 +21,16 @@ import {
   JoinMismatch,
   joinPieces,
 } from './pieces.ts';
-import { EncodeProgress, FontReport, prepareRender, type RenderHooks, render } from './render.ts';
+import {
+  bytesStage,
+  EncodeProgress,
+  FontReport,
+  prepareRender,
+  progressWriter,
+  type RenderHooks,
+  render,
+  saveFile,
+} from './render.ts';
 
 /**
  * A render made in pieces on one machine, several encoding at once, then joined: as subs.rocks
@@ -199,9 +208,12 @@ export async function renderInParallel(
   const room = 2 * renderBytes(settings, job.durationMs, pixels, grid) + 1e9;
   if (plan.slots < 2 || pieces.length < 2 || bavail * bsize < room) return wholly();
 
+  const write = progressWriter(job.progress, hooks.onProgress);
+  const preparing = bytesStage('preparing', write);
   const env = await prepareRender(job, workDir);
   // A copy of the original where there's room for it too, which every piece reads.
-  const input = await originalInput(job.input.key, workDir, () => room);
+  const input = await originalInput(job.input.key, workDir, () => room, preparing.io);
+  await preparing.settle();
   log('info', 'render in pieces', {
     slots: plan.slots,
     pieces: pieces.length,
@@ -212,15 +224,7 @@ export async function renderInParallel(
   const file = container(settings);
   const dir = join(workDir, 'pieces');
   await mkdir(dir, { recursive: true });
-  const { progress: progressFile } = job;
-  const { onProgress } = hooks;
-  const progress =
-    progressFile || onProgress
-      ? new EncodeProgress(job.durationMs, async (value) => {
-          onProgress?.(value);
-          if (progressFile) await putJson(progressFile.key, value);
-        })
-      : null;
+  const progress = write ? new EncodeProgress(job.durationMs, write) : null;
   const reports = pieces.map(() => new FontReport());
   const paths = pieces.map((piece) => join(dir, `piece-${piece.index}.${file.extension}`));
   const audio = join(dir, audioFile(settings));
@@ -274,7 +278,7 @@ export async function renderInParallel(
       for (const glyph of found.missingGlyphs) missing.add(glyph);
     }
     return {
-      output: await putFile(out, job.output.key, file.mime),
+      output: await saveFile(out, job.output.key, file.mime, write),
       ...probed,
       faces: [...faces].slice(0, 50),
       missingGlyphs: [...missing].slice(0, 100),

@@ -14,14 +14,17 @@ import { audioArgs, container, decodeArgs, settingsOf, videoArgs } from './encod
 import { JobError } from './errors.ts';
 import { NETWORK_INPUT, type RunOptions, run, seconds } from './ffmpeg.ts';
 import type { Hardware } from './hardware.ts';
-import { getFile, objectUrl, putFile, putJson } from './io.ts';
+import { getFile, type IoOptions, objectUrl, putFile, putJson } from './io.ts';
 import {
+  bytesStage,
   EncodeProgress,
   FontReport,
   prepareRender,
   probeOutput,
+  progressWriter,
   renderAudioFilter,
   renderFilter,
+  saveFile,
 } from './render.ts';
 
 /**
@@ -307,17 +310,41 @@ export async function joinPieces(
   return probed;
 }
 
-/** The pieces joined on a machine of their own: read from storage, written back. */
+/**
+ * The pieces joined on a machine of their own: read from storage, saying how much of them has
+ * come where the job gives their sizes, and written back.
+ */
 export async function joinRender(job: RenderJoinJob, workDir: string): Promise<RenderJoinResult> {
+  const write = progressWriter(job.progress);
   const file = container(job.settings);
   const pieces = job.pieces.map((piece, i) => ({
     path: join(workDir, `piece-${i}.${file.extension}`),
     frames: piece.frames,
   }));
-  await Promise.all(job.pieces.map((piece, i) => getFile(piece.key, pieces[i]?.path ?? '')));
+  const gathering = bytesStage('joining', write);
+  // The pieces come at once: how much of all of them has, where the job gives their sizes.
+  const total = job.pieces.reduce((sum, piece) => sum + (piece.bytes ?? 0), 0);
+  const came = job.pieces.map(() => 0);
+  const gather = (i: number): IoOptions => {
+    const told = gathering.io.onBytes;
+    if (!told || total === 0) return {};
+    return {
+      onBytes: (done) => {
+        came[i] = done;
+        told(
+          came.reduce((sum, bytes) => sum + bytes, 0),
+          total,
+        );
+      },
+    };
+  };
+  await Promise.all(
+    job.pieces.map((piece, i) => getFile(piece.key, pieces[i]?.path ?? '', gather(i))),
+  );
   const audio = job.audio ? join(workDir, audioFile(job.settings)) : null;
   if (job.audio && audio) await getFile(job.audio.key, audio);
   const out = join(workDir, `render.${file.extension}`);
   const probed = await joinPieces(job, pieces, audio, out, workDir);
-  return { output: await putFile(out, job.output.key, file.mime), ...probed };
+  await gathering.settle();
+  return { output: await saveFile(out, job.output.key, file.mime, write), ...probed };
 }

@@ -191,6 +191,12 @@ describe('a render on this machine', () => {
       state: 'done',
       result: { output: { key: 'render.mp4', mime: 'video/mp4' }, width: 320, height: 240 },
     });
+    // Heard as it went: its original copied, its frames encoded, its file stored.
+    expect([...new Set(heard.map((report) => report.stage))]).toEqual([
+      'preparing',
+      'encoding',
+      'saving',
+    ]);
     const made = join(work, 'made.mp4');
     writeFileSync(made, files.get('render.mp4') ?? Buffer.alloc(0));
     const streams = JSON.parse(
@@ -256,6 +262,11 @@ describe('a render on this machine', () => {
       },
     );
     expect(plans).toEqual([{ pieces: 3, slots: 2 }]);
+    expect([...new Set(heard.map((report) => report.stage))]).toEqual([
+      'preparing',
+      'encoding',
+      'saving',
+    ]);
     expect(result).toMatchObject({
       output: { key: 'pieces.mp4', mime: 'video/mp4' },
       width: 320,

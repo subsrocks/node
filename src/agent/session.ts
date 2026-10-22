@@ -1,6 +1,6 @@
 import type { Hardware } from '../engine/hardware.ts';
 import type { MachineBudget } from '../engine/parallel.ts';
-import { ENGINE_VERSION, type RenderJob } from '../job.ts';
+import { ENGINE_VERSION, type RenderJob, type RenderStage } from '../job.ts';
 import {
   NODE_CLOSE,
   NODE_PROTOCOL,
@@ -26,6 +26,14 @@ import type { Tools } from './tools.ts';
  * drops them all) without stopping a render under way. It ends when it's removed from its
  * workspace, when another copy of it connects, or when it's told to stop.
  */
+
+/** What a render is doing, as its progress line says it. */
+const STAGE_WORDS: Record<RenderStage, string> = {
+  preparing: 'Copying the video',
+  encoding: 'Rendering',
+  joining: 'Joining',
+  saving: 'Uploading',
+};
 
 /** How often it pings, and how long without a pong before it takes the connection for dead. */
 const PING_EVERY_MS = 20_000;
@@ -350,6 +358,7 @@ export class Session {
       this.hardware?.kind === 'videotoolbox' ? 'the media engine' : 'the GPU',
     );
     this.log.info(`Rendering ${line}`);
+    let shown: RenderStage | null = null;
     const running = startJob(job, {
       server: this.server,
       store: this.store,
@@ -357,8 +366,12 @@ export class Session {
       tools: this.tools,
       hardware: this.hardware,
       budget: this.budget,
-      onProgress: ({ fraction, remainingMs }) =>
-        this.log.progress('Rendering', fraction, remainingMs),
+      onProgress: ({ stage, fraction, remainingMs }) => {
+        // Each stage on a line of its own.
+        if (stage !== shown) this.log.endProgress();
+        shown = stage;
+        this.log.progress(STAGE_WORDS[stage], fraction, remainingMs);
+      },
     });
     this.job = running;
     this.send({ type: 'started', job: job.id });

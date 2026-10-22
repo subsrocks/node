@@ -2,6 +2,10 @@
 
 What changed in each release of the node, for whoever runs one. A release is published as `ghcr.io/subsrocks/node:<version>` and as programs on GitHub Releases.
 
+## 1.2.0
+
+- A render says what it's doing before and after its encode, on subs.rocks and on the machine's own line: copying the video to the machine, with how much has come; rendering; joining its pieces; uploading the file, with how much has gone up. The project page shows each step's share done and its time left, instead of 0% while the video comes over and 100% while the file goes up.
+
 ## 1.1.1
 
 - Says where to get a token as subs.rocks now names the page: **Settings › Render machines**.
