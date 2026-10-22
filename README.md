@@ -1,6 +1,6 @@
 # subs.rocks node
 
-Render your [subs.rocks](https://subs.rocks) videos on machines of your own: a workstation with a fast graphics card, an edit bay that's idle at night, a server in a rack. The node connects to your workspace and waits for renders; each one it makes costs nothing: no render minutes, no credits.
+Render your [subs.rocks](https://subs.rocks) videos on computers of your own, your workspace's **render machines**: a workstation with a fast graphics card, an edit bay that's idle at night, a server in a rack. The node connects to your workspace and waits for renders; each one it makes costs nothing: no render minutes, no credits.
 
 It's the same render engine subs.rocks runs on its own machines, so a render made here has the subtitles subs.rocks would draw: by the same libass, with the same fonts, at the preset's settings. And it uses what the machine has: a Mac's media engines, an NVIDIA, Intel or AMD graphics card, and every thread of a big processor.
 
@@ -8,7 +8,7 @@ Machines of your own come with the **Team** and **Studio** plans.
 
 ## Quick start
 
-In subs.rocks, open **Settings › Your machines** and choose **Add a machine**. It gives you a command with a token in it, good for an hour on as many machines as you run it on.
+In subs.rocks, open **Settings › Render machines** and choose **Add a render machine**. It gives you a command with a token in it, good for an hour on as many machines as you run it on.
 
 ### The program (macOS, Linux)
 
@@ -120,7 +120,7 @@ The node says in its log when a newer version is out, and a machine too old to t
 | `libass here picks fonts with macOS's font system` | An ffmpeg other than the program's (`--ffmpeg`) draws text a template's fonts can't in the Mac's fonts; leave `--ffmpeg` out |
 | `Encoding on the CPU. To encode on the graphics card, give the container it` | Add `--gpus all` (NVIDIA) or `--device /dev/dri` (Intel, AMD) to `docker run` |
 | `the NVIDIA GPU's encoders didn't work`, `the graphics' video encoders didn't work` | The driver (NVIDIA's, or VA-API's) isn't set up; renders encode on the processor meanwhile |
-| `That registration token is wrong or has expired` | Tokens last an hour: make a new one with **Add a machine** |
+| `That registration token is wrong or has expired` | Tokens last an hour: make a new one with **Add a render machine** |
 | `This machine was removed from its workspace` | Add it again from Settings, with a new token |
 | `The workspace's plan doesn't include machines of its own` | It waits, and connects once the workspace is on Team or Studio |
 | `subs.rocks needs a newer version of this node` | Update it |

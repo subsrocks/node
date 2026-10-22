@@ -2,6 +2,10 @@
 
 What changed in each release of the node, for whoever runs one. A release is published as `ghcr.io/subsrocks/node:<version>` and as programs on GitHub Releases.
 
+## 1.1.1
+
+- Says where to get a token as subs.rocks now names the page: **Settings › Render machines**.
+
 ## 1.1.0
 
 - Renders encode on the machine's video hardware, each kind tried at start in every way a render can ask of it: Apple's media engines on a Mac (H.264, H.265, and ProRes on chips with ProRes engines; an Intel Mac's H.264 and H.265), NVIDIA graphics cards, and Intel and AMD graphics on Linux (VA-API; in Docker, `--device /dev/dri`). subs.rocks sends a render to the hardware only when it was seen to make what the render asks; the rest encode on the processor.

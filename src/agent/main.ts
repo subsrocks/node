@@ -22,13 +22,13 @@ import { findTools, type Tools } from './tools.ts';
 /** What each refusal means to the person reading the log, and what to do. */
 const REFUSED: Record<string, string> = {
   NODE_TOKEN_INVALID:
-    'That registration token is wrong or has expired (they last an hour). Get a new one in Settings › Your machines.',
+    'That registration token is wrong or has expired (they last an hour). Get a new one in Settings › Render machines.',
   NODE_INVALID:
-    'This machine was removed from its workspace. To render for it again, add it again in Settings › Your machines.',
+    'This machine was removed from its workspace. To render for it again, add it again in Settings › Render machines.',
   NODES_NOT_ON_PLAN:
     "The workspace's plan doesn't include machines of its own: they come with the Team and Studio plans.",
   NODES_FULL:
-    'The workspace has as many machines as it may. Remove one in Settings › Your machines.',
+    'The workspace has as many machines as it may. Remove one in Settings › Render machines.',
   WORKSPACE_SUSPENDED: 'The workspace is suspended.',
   NODE_OUTDATED: `subs.rocks needs a newer version of this node than ${NODE_VERSION}. Update it: https://subs.rocks/docs/machines#updating`,
   RATE_LIMITED: 'Too many tries: wait a minute and try again.',
@@ -97,7 +97,7 @@ async function start(options: Options, log: Output): Promise<number> {
   if (!credential) {
     if (!options.token) {
       log.error('This machine hasn’t joined a workspace yet: start it with --token (SUBS_TOKEN).');
-      log.say('Get a token in Settings › Your machines on subs.rocks.');
+      log.say('Get a token in Settings › Render machines on subs.rocks.');
       return 1;
     }
     try {
@@ -232,7 +232,7 @@ async function doctor(options: Options, log: Output): Promise<number> {
     }
   } else {
     log.info(
-      'Hasn’t joined a workspace yet: `subs-node start --token …`, with a token from Settings › Your machines',
+      'Hasn’t joined a workspace yet: `subs-node start --token …`, with a token from Settings › Render machines',
     );
   }
   log.say(

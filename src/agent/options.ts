@@ -43,7 +43,7 @@ Usage
   subs-node version
 
 Options
-  --token <token>   the registration token from Settings › Your machines (SUBS_TOKEN)
+  --token <token>   the registration token from Settings › Render machines (SUBS_TOKEN)
   --name <name>     what the workspace calls it; this machine's name if not given (SUBS_NAME)
   --gpu auto|off    encode on an NVIDIA GPU when there is one (SUBS_GPU, default auto)
   --ffmpeg <path>   the ffmpeg to render with, its ffprobe beside it (SUBS_FFMPEG); found if not
