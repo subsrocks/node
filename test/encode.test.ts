@@ -21,6 +21,7 @@ import {
   type Hardware,
   hardwareEncoder,
   NVENC,
+  nvencQuality,
   vaapiQp,
   videotoolboxQuality,
 } from '../src/engine/hardware.ts';
@@ -209,12 +210,17 @@ describe('a render’s encode', () => {
     ]);
     expect(decodeArgs(NVENC)).toEqual(['-hwaccel', 'cuda']);
     expect(decodeArgs()).toEqual([]);
-    // A constant quality as NVENC's own, capped; H.264 at High; 10 bits as P010.
+    // A constant quality where NVENC makes what x264 does at that CRF, capped; H.264 at High; 10
+    // bits as P010.
     const capped = videoArgs(h264, 0, NVENC);
     expect(capped.slice(0, 2)).toEqual(['-c:v', 'h264_nvenc']);
     expect(capped).toEqual(
-      expect.arrayContaining(['-cq', String((h264.rate as { crf: number }).crf)]),
+      expect.arrayContaining(['-cq', String((h264.rate as { crf: number }).crf + 7)]),
     );
+    expect(nvencQuality('h264', 18)).toBe(25);
+    expect(nvencQuality('hevc', 24)).toBe(31);
+    expect(nvencQuality('hevc', 50)).toBe(51);
+    expect(nvencQuality('av1', 30)).toBe(30);
     expect(capped).toEqual(expect.arrayContaining(['-profile:v', 'high']));
     const tenBit: RenderSettings = { ...hevc, tenBit: true };
     expect(pixelFormat(tenBit, NVENC)).toBe('p010le');

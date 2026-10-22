@@ -2,6 +2,10 @@
 
 What changed in each release of the node, for whoever runs one. A release is published as `ghcr.io/subsrocks/node:<version>` and as programs on GitHub Releases.
 
+## 1.3.0
+
+- On an NVIDIA card, a preset's constant quality (CRF) makes what the processor's encoders make at that number. NVENC is given the CRF plus seven, where it was measured to match x264 and x265; the same number asked it for near-lossless, and files 1.5 to 1.7 times as big.
+
 ## 1.2.0
 
 - A render says what it's doing before and after its encode, on subs.rocks and on the machine's own line: copying the video to the machine, with how much has come; rendering; joining its pieces; uploading the file, with how much has gone up. The project page shows each step's share done and its time left, instead of 0% while the video comes over and 100% while the file goes up.

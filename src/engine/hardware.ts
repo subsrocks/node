@@ -125,7 +125,20 @@ export function hardwareUpload(kind: HardwareKind): string[] {
   return kind === 'vaapi' ? ['hwupload'] : [];
 }
 
-/** NVENC's rate control: a constant quality as its `-cq` (its scale near x264's CRF). */
+/**
+ * How far above a CRF NVENC's `-cq` makes what x264 and x265 make at that CRF (ADR 0081). The same
+ * number asks NVENC for near-lossless: measured on an L4 with 4K footage (VMAF against the
+ * source, mean and fifth percentile), `-cq` 18 wrote 1.5 to 1.7 times x264's bytes at CRF 18, and
+ * `-cq` 25 matched it, for H.264 and H.265 alike. AV1 wasn't measured: its CRF is taken as it is.
+ */
+export const NVENC_CQ_OVER_CRF = 7;
+
+/** A CRF as NVENC's constant quality (`-cq`, 0 to 51). */
+export function nvencQuality(codec: VideoCodec, crf: number): number {
+  return codec === 'av1' ? crf : Math.min(51, crf + NVENC_CQ_OVER_CRF);
+}
+
+/** NVENC's rate control: a constant quality as its `-cq` (`nvencQuality`). */
 function nvencRate(settings: RenderSettings): string[] {
   const { rate } = settings;
   if (rate.mode === 'crf') {
@@ -134,7 +147,7 @@ function nvencRate(settings: RenderSettings): string[] {
       '-rc',
       'vbr',
       '-cq',
-      String(rate.crf),
+      String(nvencQuality(settings.codec, rate.crf)),
       '-b:v',
       '0',
       ...(cap === null ? [] : ['-maxrate', kbps(cap), '-bufsize', kbps(cap * 2)]),
