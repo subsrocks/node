@@ -1,12 +1,13 @@
 import { JobError } from '../engine/errors.ts';
+import { fetchVideo } from '../engine/fetch.ts';
 import { renderInParallel } from '../engine/parallel.ts';
-import { EngineError, RenderJob } from '../job.ts';
+import { EngineError, FetchError, FetchJob, RenderJob } from '../job.ts';
 import type { FromJob, ToJob } from './runner.ts';
 
 /**
- * A render's own process (`__job`): reads its job from the node, runs the engine on it, on the
- * machine's hardware and in pieces at once where the machine gains by it, tells the node its
- * progress and how it ended, and exits. The engine's settings (where the job's files are, the
+ * A job's own process (`__job`): reads its job from the node, runs the engine on it (a render, on
+ * the machine's hardware and in pieces at once where the machine gains by it; a download, ADR
+ * 0092), tells the node its progress and how it ended, and exits. The engine's settings (where the job's files are, the
  * token for them, where to work, the tools) come from the environment the node started it with.
  */
 export async function jobProcess(): Promise<void> {
@@ -19,6 +20,16 @@ export async function jobProcess(): Promise<void> {
     process.once('message', (value) => resolve(value as ToJob));
   });
   try {
+    if (message.kind === 'fetch') {
+      const job = FetchJob.parse(message.input);
+      const dir = process.env['WORK_DIR'] ?? '.';
+      const result = await fetchVideo(job, dir, (fraction) => {
+        void send({ type: 'fetched', fraction });
+      });
+      await send({ type: 'done', result });
+      process.disconnect?.();
+      return;
+    }
     const input = RenderJob.parse(message.input);
     const result = await renderInParallel(
       input,
@@ -42,7 +53,10 @@ export async function jobProcess(): Promise<void> {
     await send({
       type: 'failed',
       error: {
-        code: EngineError.safeParse(failure.code).data ?? 'processing_failed',
+        code:
+          (message.kind === 'fetch'
+            ? FetchError.safeParse(failure.code).data
+            : EngineError.safeParse(failure.code).data) ?? 'processing_failed',
         retryable: failure.retryable,
         detail: failure.message.slice(0, 2000),
       },

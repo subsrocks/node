@@ -19,12 +19,14 @@ import { duration, type Output, size } from './output.ts';
 import { type RunningJob, startJob } from './runner.ts';
 import type { Credential, Pending, Store } from './store.ts';
 import type { Tools } from './tools.ts';
+import type { Downloader } from './ytdlp.ts';
 
 /**
- * The node at work: connected to subs.rocks, it takes renders one at a time, says how each
+ * The node at work: connected to subs.rocks, it takes renders one at a time, and (with a
+ * downloader) downloads of linked videos one at a time beside them (ADR 0092); says how each
  * ended until subs.rocks acknowledges it, and connects again when the connection drops (a deploy
- * drops them all) without stopping a render under way. It ends when it's removed from its
- * workspace, when another copy of it connects, or when it's told to stop.
+ * drops them all) without stopping a job under way. It ends when it's removed from its workspace,
+ * when another copy of it connects, or when it's told to stop.
  */
 
 /** What a render is doing, as its progress line says it. */
@@ -100,11 +102,18 @@ export class Session {
   /** Its video hardware, and what it may use, which each render is told. */
   private readonly hardware: Hardware | null;
   private readonly budget: MachineBudget;
+  /** The downloader its downloads run, when it takes them (`ytdlp.ts`). */
+  private readonly downloader: Downloader | null;
+  /** Its downloads may sign in with the workspace's cookies (`--cookies`). */
+  private readonly signsIn: boolean;
   private socket: WebSocket | null = null;
+  /** The render it's making, and the download beside it. */
   private job: RunningJob | null = null;
-  /** The job someone stopped: its end isn't reported. */
-  private cancelled: string | null = null;
-  private pending: Pending | null = null;
+  private fetching: RunningJob | null = null;
+  /** Jobs someone stopped: their ends aren't reported. */
+  private readonly cancelled = new Set<string>();
+  /** Jobs' ends said but not yet heard. */
+  private pending: Pending[] = [];
   private draining = false;
   private ended: SessionEnd | null = null;
   private readonly wake = new AbortController();
@@ -123,6 +132,8 @@ export class Session {
     machine: NodeMachine;
     tools: Tools;
     hardware: Hardware | null;
+    downloader?: Downloader | null;
+    cookies?: boolean;
   }) {
     this.server = context.server;
     this.credential = context.credential;
@@ -131,6 +142,8 @@ export class Session {
     this.machine = context.machine;
     this.tools = context.tools;
     this.hardware = context.hardware;
+    this.downloader = context.downloader ?? null;
+    this.signsIn = context.cookies ?? true;
     this.budget = {
       threads: context.machine.cpu.threads,
       memoryBytes: context.machine.memoryBytes,
@@ -159,7 +172,7 @@ export class Session {
           await this.park(code === NODE_CLOSE.plan ? 'NODES_NOT_ON_PLAN' : 'WORKSPACE_SUSPENDED');
           continue;
         }
-        if (this.draining && !this.job) return this.finish('stopped');
+        if (this.draining && !this.busy) return this.finish('stopped');
         // It was connected and welcomed: the waits start over.
         if (welcomed) wait = FIRST_WAIT_MS;
       } catch (error) {
@@ -187,7 +200,14 @@ export class Session {
   private finish(end: SessionEnd): SessionEnd {
     this.ended = end;
     this.job?.stop('release');
+    this.fetching?.stop('release');
     return end;
+  }
+
+  /** The job of a kind it's on, or whose end it's still to say. */
+  private holding(kind: 'render' | 'fetch'): string | null {
+    const running = kind === 'fetch' ? this.fetching : this.job;
+    return running?.id ?? this.pending.find((each) => each.kind === kind)?.job ?? null;
   }
 
   /** Waits an hour while its plan or workspace keeps it from rendering, saying why once. */
@@ -254,7 +274,10 @@ export class Session {
           engine: ENGINE_VERSION,
           version: NODE_VERSION,
           machine: this.machine,
-          job: this.job?.id ?? this.pending?.job ?? null,
+          job: this.holding('render'),
+          takes: this.downloader ? ['render', 'fetch'] : ['render'],
+          signsIn: this.signsIn,
+          fetching: this.holding('fetch'),
           draining: this.draining,
         });
       });
@@ -313,21 +336,26 @@ export class Session {
         }
         this.connectedOnce = true;
         this.nudge(message.latest);
-        if (this.pending) this.send({ type: 'ended', ...this.pending });
+        for (const { job, outcome } of this.pending) this.send({ type: 'ended', job, outcome });
         return;
       case 'job':
         this.take(message.job);
         return;
       case 'cancel':
-        if (this.job?.id === message.job) {
-          this.cancelled = message.job;
-          this.job.stop('cancel');
-          this.log.warn('The render was stopped on subs.rocks');
+        for (const running of [this.job, this.fetching]) {
+          if (running?.id !== message.job) continue;
+          this.cancelled.add(message.job);
+          running.stop('cancel');
+          this.log.warn(
+            running === this.job
+              ? 'The render was stopped on subs.rocks'
+              : 'The download was stopped on subs.rocks',
+          );
         }
-        if (this.pending?.job === message.job) void this.settle(null);
+        void this.heard(message.job);
         return;
       case 'ack':
-        if (this.pending?.job === message.job) void this.settle(null);
+        void this.heard(message.job);
         return;
       case 'renamed':
         this.log.info(`Renamed “${message.name}”`);
@@ -336,36 +364,65 @@ export class Session {
     }
   }
 
-  private async settle(pending: Pending | null): Promise<void> {
+  /** Its jobs' ends not yet heard, kept on disk too. */
+  private async settle(pending: Pending[]): Promise<void> {
     this.pending = pending;
     await this.store.setPending(pending).catch((error: unknown) => {
-      this.log.warn(`Couldn't keep the render's end on disk: ${String(error)}`);
+      this.log.warn(`Couldn't keep a job's end on disk: ${String(error)}`);
     });
   }
 
+  /** subs.rocks heard a job's end (or stopped it): no need to say it again. */
+  private async heard(id: string): Promise<void> {
+    if (!this.pending.some((each) => each.job === id)) return;
+    await this.settle(this.pending.filter((each) => each.job !== id));
+  }
+
   /**
-   * A job it was sent: taken when it's free, else given straight back. One someone stopped is
-   * free already: its process is being killed, and the new job works in a folder of its own.
+   * A job it was sent: taken when its slot is free (a render's, or a download's beside it), else
+   * given straight back. One someone stopped is free already: its process is being killed, and
+   * the new job works in a folder of its own. A download it can't make (no downloader, or turned
+   * off) is given back too.
    */
   private take(job: NodeJob): void {
-    const busy = this.job !== null && this.cancelled !== this.job.id;
-    if (busy || this.draining || this.ended) {
+    const fetch = job.kind === 'fetch';
+    const slot = fetch ? this.fetching : this.job;
+    const busy = slot !== null && !this.cancelled.has(slot.id);
+    if (busy || this.draining || this.ended || (fetch && !this.downloader)) {
       this.send({ type: 'ended', job: job.id, outcome: { state: 'released', ms: 0 } });
       return;
     }
-    const line = jobLine(
-      job.input,
-      this.hardware?.kind === 'videotoolbox' ? 'the media engine' : 'the GPU',
-    );
-    this.log.info(`Rendering ${line}`);
+    if (job.kind === 'fetch') {
+      // Its site, not its address: the log says where it's from, not what.
+      const site = (() => {
+        try {
+          return new URL(job.input.url).hostname.replace(/^www\./, '');
+        } catch {
+          return 'its site';
+        }
+      })();
+      this.log.info(`Downloading a video from ${site}`);
+    } else {
+      const line = jobLine(
+        job.input,
+        this.hardware?.kind === 'videotoolbox' ? 'the media engine' : 'the GPU',
+      );
+      this.log.info(`Rendering ${line}`);
+    }
     let shown: RenderStage | null = null;
-    const running = startJob(job, {
+    // Told not to sign in, it doesn't, whatever it's offered.
+    const given =
+      job.kind === 'fetch' && !this.signsIn
+        ? { ...job, input: { ...job.input, cookies: null, cookiesFile: undefined } }
+        : job;
+    const running = startJob(given, {
       server: this.server,
       store: this.store,
       log: this.log,
       tools: this.tools,
       hardware: this.hardware,
       budget: this.budget,
+      downloader: this.downloader,
       onProgress: ({ stage, fraction, remainingMs }) => {
         // Each stage on a line of its own.
         if (stage !== shown) this.log.endProgress();
@@ -373,52 +430,61 @@ export class Session {
         this.log.progress(STAGE_WORDS[stage], fraction, remainingMs);
       },
     });
-    this.job = running;
+    if (fetch) this.fetching = running;
+    else this.job = running;
     this.send({ type: 'started', job: job.id });
-    void running.ended.then((outcome) => this.done(job.id, outcome));
+    void running.ended.then((outcome) => this.done(job.id, job.kind, outcome));
   }
 
-  private async done(id: string, outcome: NodeJobOutcome): Promise<void> {
+  private async done(id: string, kind: NodeJob['kind'], outcome: NodeJobOutcome): Promise<void> {
     // A stopped job ends after the next has started: only its own end clears it.
-    if (this.job?.id === id) this.job = null;
-    this.log.endProgress();
-    if (this.cancelled === id) {
-      this.cancelled = null;
+    if (kind === 'render' && this.job?.id === id) this.job = null;
+    if (kind === 'fetch' && this.fetching?.id === id) this.fetching = null;
+    if (kind === 'render') this.log.endProgress();
+    const what = kind === 'fetch' ? 'download' : 'render';
+    if (this.cancelled.has(id)) {
+      this.cancelled.delete(id);
     } else {
       if (outcome.state === 'done') {
         const { output } = outcome.result;
-        this.log.ok(`Rendered in ${duration(outcome.ms)} · ${size(output.bytes)}`);
+        this.log.ok(
+          `${kind === 'fetch' ? 'Downloaded' : 'Rendered'} in ${duration(outcome.ms)} · ${size(output.bytes)}`,
+        );
       } else if (outcome.state === 'failed') {
-        this.log.error(`The render failed: ${outcome.error.detail.split('\n').at(-1)}`, {
+        this.log.error(`The ${what} failed: ${outcome.error.detail.split('\n').at(-1)}`, {
           retry: outcome.error.retryable ? 'subs.rocks tries it again' : 'no',
         });
       } else {
-        this.log.info('Gave the render back, for another machine');
+        this.log.info(`Gave the ${what} back, for another machine`);
       }
-      await this.settle({ job: id, outcome });
+      await this.settle([
+        ...this.pending.filter((each) => each.job !== id),
+        { job: id, kind, outcome },
+      ]);
       this.send({ type: 'ended', job: id, outcome });
     }
-    if (this.draining || this.ended) {
-      // Its end said (or kept to say next time): it can go.
-      await sleep(this.pending ? 2_000 : 0);
+    if ((this.draining || this.ended) && !this.busy) {
+      // Its ends said (or kept to say next time): it can go.
+      await sleep(this.pending.length > 0 ? 2_000 : 0);
       if (!this.ended) this.ended = 'stopped';
       this.wake.abort();
     }
   }
 
   /**
-   * Stops: at once (`now`), giving its render back for another machine; or once its render is
-   * done, taking no other meanwhile.
+   * Stops: at once (`now`), giving its jobs back for another machine; or once they're done,
+   * taking no other meanwhile.
    */
   stop(now: boolean): void {
-    if (!this.job) {
+    if (!this.busy) {
       this.ended = this.ended ?? 'stopped';
       this.wake.abort();
       return;
     }
     if (now) {
       this.draining = true;
-      this.job.stop('release');
+      this.job?.stop('release');
+      this.fetching?.stop('release');
       return;
     }
     if (this.draining) return;
@@ -426,8 +492,8 @@ export class Session {
     this.send({ type: 'draining' });
   }
 
-  /** Whether it's busy with a render, for a stop asked for twice. */
+  /** Whether it's busy with a render or a download, for a stop asked for twice. */
   get busy(): boolean {
-    return this.job !== null;
+    return this.job !== null || this.fetching !== null;
   }
 }

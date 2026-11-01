@@ -12,11 +12,13 @@ import { Output, size } from './output.ts';
 import { Session } from './session.ts';
 import { type Credential, Store } from './store.ts';
 import { findTools, type Tools } from './tools.ts';
+import { type Downloader, findDownloader } from './ytdlp.ts';
 
 /**
- * `subs-node`: a machine of a workspace's own that renders its videos. `start` joins the
- * workspace with a registration token the first time, then waits for renders; the rest look
- * after it. See USAGE, and https://subs.rocks/docs/machines.
+ * `subs-node`: a machine of a workspace's own that renders its videos, and downloads the linked
+ * videos subs.rocks's servers can't (ADR 0092). `start` joins the workspace with a registration
+ * token the first time, then waits for work; the rest look after it. See USAGE, and
+ * https://subs.rocks/docs/machines.
  */
 
 /** What each refusal means to the person reading the log, and what to do. */
@@ -25,8 +27,7 @@ const REFUSED: Record<string, string> = {
     'That registration token is wrong or has expired (they last an hour). Get a new one in Settings › Render machines.',
   NODE_INVALID:
     'This machine was removed from its workspace. To render for it again, add it again in Settings › Render machines.',
-  NODES_NOT_ON_PLAN:
-    "The workspace's plan doesn't include machines of its own: they come with the Team and Studio plans.",
+  NODES_NOT_ON_PLAN: "The workspace's plan doesn't include machines of its own.",
   NODES_FULL:
     'The workspace has as many machines as it may. Remove one in Settings › Render machines.',
   WORKSPACE_SUSPENDED: 'The workspace is suspended.',
@@ -54,6 +55,32 @@ async function machineOf(options: Options, store: Store, tools: Tools, log: Outp
   if (hardware?.ok) log.ok(hardware.text);
   for (const note of described.notes) log.info(note);
   return described;
+}
+
+/**
+ * The downloader its downloads run (`ytdlp.ts`), when it takes them: found, or fetched once. None,
+ * it renders all the same, and says why it doesn't download.
+ */
+async function downloaderOf(
+  options: Options,
+  store: Store,
+  log: Output,
+): Promise<Downloader | null> {
+  if (options.downloads === 'off') {
+    log.info('Not downloading videos for the workspace (--downloads off)');
+    return null;
+  }
+  const found = await findDownloader(options.ytDlp, store.dir, {
+    onFetch: (version) => log.info(`Fetching yt-dlp ${version} for downloads (once)…`),
+  });
+  if ('problem' in found) {
+    log.warn(`Not downloading videos for the workspace: ${found.problem}`);
+    return null;
+  }
+  const signIn = options.cookies === 'off' ? ', never signed in (--cookies off)' : '';
+  const js = found.jsRuntime ? '' : ' (no JavaScript runtime: YouTube may serve less)';
+  log.ok(`Downloads videos our servers can’t with yt-dlp ${found.version}${signIn}${js}`);
+  return found;
 }
 
 /** Its video hardware in a line, or what would give it some; null when there's nothing to say. */
@@ -123,6 +150,7 @@ async function start(options: Options, log: Output): Promise<number> {
       return 1;
     }
   }
+  const downloader = await downloaderOf(options, store, log);
   const session = new Session({
     server: options.server,
     credential,
@@ -131,16 +159,18 @@ async function start(options: Options, log: Output): Promise<number> {
     machine,
     tools,
     hardware: described.hardware?.hardware ?? null,
+    downloader,
+    cookies: options.cookies === 'on',
   });
   let asked = 0;
   const stop = (signal: NodeJS.Signals) => {
     asked += 1;
-    // Ctrl-C finishes the render under way first; again, or a TERM (a container stopping), gives
-    // it back at once for another machine.
+    // Ctrl-C finishes the jobs under way first; again, or a TERM (a container stopping), gives
+    // them back at once for another machine.
     const now = signal === 'SIGTERM' || asked > 1;
     if (session.busy && !now) {
       log.warn(
-        'Finishing this render, then stopping. Ctrl-C again stops now (it goes to another machine).',
+        'Finishing what it’s doing, then stopping. Ctrl-C again stops now (it goes to another machine).',
       );
     }
     session.stop(now);
@@ -209,6 +239,17 @@ async function doctor(options: Options, log: Output): Promise<number> {
     }
   }
   for (const note of described.notes) log.info(note);
+  if (options.downloads === 'on') {
+    // Downloads are a help, not a need: without a downloader it renders all the same.
+    const found = await findDownloader(options.ytDlp, store.dir, {
+      onFetch: (version) => log.info(`Fetching yt-dlp ${version} (once)…`),
+    });
+    if ('problem' in found) log.warn(`Can't download videos: ${found.problem}`);
+    else {
+      const js = found.jsRuntime ? ` · ${found.jsRuntime} for YouTube` : '';
+      log.ok(`yt-dlp ${found.version}${js}`);
+    }
+  }
   try {
     await call(options.server, '/api/health', {}, null);
     log.ok(`Reaches ${options.server}`);

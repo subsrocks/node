@@ -374,9 +374,118 @@ export const ENGINE_ERRORS = ['processing_failed', 'corrupt_media', 'unsupported
 export const EngineError = z.enum(ENGINE_ERRORS);
 export type EngineError = z.infer<typeof EngineError>;
 
+// ── Downloads ──────────────────────────────────────────────────────────────────────────────────
+
+/** The most a download keeps, whatever the job allows: one object up to it is one storage write. */
+export const MAX_FETCH_BYTES = 4 * 1024 ** 3;
+/** The longest video a download takes: 6 hours. */
+export const MAX_FETCH_DURATION_MS = 6 * 60 * 60 * 1000;
+/** The width of the list-sized copy of a video's picture (WebP). */
+export const FETCH_THUMBNAIL_WIDTH = 640;
+/** The longest description kept of what a video's page says. */
+export const FETCHED_DESCRIPTION_MAX = 5000;
+
+/**
+ * Why a download didn't happen, as the downloader (yt-dlp) says it: the site asked to sign in
+ * (`source_blocked`: a bot check, a video for accounts; `source_age_restricted`), won't share the
+ * video (private, removed, members-only, not where the machine is), it's larger than the job may
+ * keep, no extractor knows the address, the site turned the machine away (`source_refused`: as
+ * Bilibili does data centers), or it's longer than 6 hours; or something that may pass.
+ */
+export const FETCH_ERRORS = [
+  'source_blocked',
+  'source_age_restricted',
+  'source_unavailable',
+  'source_too_large',
+  'source_unsupported',
+  'source_refused',
+  'too_long',
+  'processing_failed',
+] as const;
+export const FetchError = z.enum(FETCH_ERRORS);
+export type FetchError = z.infer<typeof FetchError>;
+
+/**
+ * Downloads a video by its page's address into storage (a linked video's original), the best up
+ * to `quality` (1080p or 4K, by the short side; 4K when absent) that fits `maxBytes`, reporting how
+ * far it is to `progress`. Signed in with `cookies` (a Netscape export) when given inline (on
+ * subs.rocks's machines), or with the file `cookiesFile` names, read like the job's other files
+ * (on a node: the workspace's cookies for the site, only while the job is the node's).
+ */
+export const FetchJob = z.object({
+  url: z.string().url(),
+  quality: z.union([z.literal(1080), z.literal(2160)]).optional(),
+  /**
+   * The largest file it may keep: smaller sizes are tried until one fits. Absent, the engine's own
+   * (`MAX_FETCH_BYTES`), as for jobs queued before plans bounded it.
+   */
+  maxBytes: z.number().int().positive().optional(),
+  cookies: z
+    .string()
+    .max(64 * 1024)
+    .nullable(),
+  cookiesFile: ObjectRef.optional(),
+  output: ObjectRef,
+  progress: ObjectRef,
+  /** Where the page's picture goes, as a JPEG, and a list-sized WebP of it. */
+  thumbnail: z.object({ original: ObjectRef, preview: ObjectRef }).optional(),
+});
+export type FetchJob = z.infer<typeof FetchJob>;
+
+/** What a video's page says of it, as the downloader reads it. */
+export const FetchedDetails = z.object({
+  title: z.string().nullable(),
+  description: z.string().max(FETCHED_DESCRIPTION_MAX).nullable().default(null),
+  /** The site as the downloader names it (`bilibili.com`). */
+  site: z.string().max(200).nullable().default(null),
+});
+export type FetchedDetails = z.infer<typeof FetchedDetails>;
+
+/** What the download stored, and what the platform said about the video. */
+export const FetchResult = z.object({
+  output: WrittenFile,
+  info: FetchedDetails.extend({
+    durationMs: z.number().int().nullable(),
+    channel: z.string().nullable(),
+    channelId: z.string().nullable(),
+    /**
+     * When it was published: to the second when the platform says (`publishedExact`), else the
+     * day (UTC midnight).
+     */
+    publishedAt: z.number().int().nullable(),
+    publishedExact: z.boolean().default(false),
+    width: z.number().int().nullable(),
+    height: z.number().int().nullable(),
+    /** The sharpest picture the page offered (its short side the most), when it listed them. */
+    offered: z
+      .object({ width: z.number().int().positive(), height: z.number().int().positive() })
+      .nullable()
+      .default(null),
+    /** The platform kept formats back (signed out, YouTube and Bilibili may): cookies may help. */
+    heldBack: z.boolean().default(false),
+    /** It signed in, with the cookies it was given (absent from engines before 1.4). */
+    signedIn: z.boolean().optional(),
+  }),
+  /** The platform's picture, kept beside the video (absent when it has none). */
+  thumbnail: z.object({ original: WrittenFile, preview: WrittenFile }).nullable().default(null),
+});
+export type FetchResult = z.infer<typeof FetchResult>;
+
+/**
+ * How far a download is, as the job writes it to `progress`; and, once its page has been read,
+ * what the platform says, so it can be shown before the video's there.
+ */
+export const FetchProgress = z.object({
+  fraction: z.number().min(0).max(1),
+  at: z.number().int(),
+  details: FetchedDetails.nullable().default(null),
+});
+export type FetchProgress = z.infer<typeof FetchProgress>;
+
 /** A job that failed: why, whether trying again may help, and what the tools said. */
 export const JobFailure = z.object({
-  code: EngineError,
+  /** A render's (`EngineError`) or a download's (`FetchError`). */
+  code: z.union([EngineError, FetchError]),
   retryable: z.boolean(),
   detail: z.string().max(2000),
 });

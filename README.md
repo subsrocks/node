@@ -1,10 +1,10 @@
 # subs.rocks node
 
-Render your [subs.rocks](https://subs.rocks) videos on computers of your own, your workspace's **render machines**: a workstation with a fast graphics card, an edit bay that's idle at night, a server in a rack. The node connects to your workspace and waits for renders; each one it makes costs nothing: no render minutes, no credits.
+Render your [subs.rocks](https://subs.rocks) videos on computers of your own, your workspace's **render machines**: a workstation with a fast graphics card, an edit bay that's idle at night, a server in a rack. The node connects to your workspace and waits for renders; each one it makes costs nothing: no render minutes, no credits. It also downloads the videos you import by their address when a site turns subs.rocks's servers away, as Bilibili does with data centers: from where the machine is, over its own connection.
 
 It's the same render engine subs.rocks runs on its own machines, so a render made here has the subtitles subs.rocks would draw: by the same libass, with the same fonts, at the preset's settings. And it uses what the machine has: a Mac's media engines, an NVIDIA, Intel or AMD graphics card, and every thread of a big processor.
 
-Machines of your own come with the **Team** and **Studio** plans.
+Every plan has machines of its own: Community one, rendering one at a time; Team and Studio as many as they like.
 
 ## Quick start
 
@@ -70,13 +70,22 @@ subs.rocks node 1.1.0
 - Each render runs in a process of its own. Stopping the render in subs.rocks stops it here, ffmpeg and all.
 - If the connection drops (a network blip, a subs.rocks deploy), it connects again and carries on with its render; subs.rocks waits three minutes for it before giving the render to another machine.
 
+## How it downloads
+
+When subs.rocks's own downloader is turned away from a video (Bilibili refuses data centers; YouTube asks them to sign in now and then) and the workspace has a machine, the download comes here instead:
+
+- **One download at a time, beside its render**, so a long render doesn't hold a video up. The video goes up to subs.rocks as it would from subs.rocks's downloader, and is prepared there.
+- **With [`yt-dlp`](https://github.com/yt-dlp/yt-dlp)**, the downloader subs.rocks runs, with the same arguments (`src/engine/fetch.ts`). The image has it; the program uses the `PATH`'s, or downloads the release named in `src/agent/ytdlp.ts` once into its data folder, checked against that release's SHA-256 before it's ever run. YouTube's challenges are solved with the machine's `node` (or `deno`) when it has one.
+- **Signed in, where the workspace has cookies for the site** (YouTube's, Bilibili's) and you let it: read only while it's downloading that video, written to the job's own folder, which goes when the job does. `--cookies off` never signs in; `--downloads off` takes no downloads.
+
 ## What it sees
 
-A node is a machine you run, so subs.rocks tells it only what a render needs:
+A node is a machine you run, so subs.rocks tells it only what a render or a download needs:
 
 - **A render's files, for that render.** The video, the subtitles to burn in and the template's fonts, named by the render's own names (`original`, `subtitles.ass`, `font-0`), and the file it writes (`render.mp4`). It reads and writes them over HTTPS with a token that works only for that render, only while it's this machine's. It can't reach anything else in storage.
+- **A download's address, for that download.** The video's page, and the files it writes by the download's own names (`video`, `thumbnail.jpg`, `thumbnail.webp`, `progress.json`), with a token for that download alone; and, when the workspace has cookies for the site and the node takes them, `cookies.txt`, read with the same token.
 - **Nothing else of the workspace.** Not the project's name, the workspace's other videos or its people, nor anything that would let it act as one of them.
-- **Its own credential.** It joins with the token once and keeps a credential of its own in its data folder (`node.json`, readable by its user only), which only lets it connect and take renders. Removing the machine in Settings ends it at once.
+- **Its own credential.** It joins with the token once and keeps a credential of its own in its data folder (`node.json`, readable by its user only), which only lets it connect and take work. Removing the machine in Settings ends it at once.
 
 The built-in fonts come from subs.rocks too (`/fonts/built-in.json`, checked by SHA-256 and kept in the data folder), so it draws what subs.rocks's editor previews.
 
@@ -96,6 +105,9 @@ subs-node version
 | `--name <name>` | `SUBS_NAME` | What the workspace calls it; a Mac's name, or the host name, if not given |
 | `--gpu auto\|off` | `SUBS_GPU` | Encode on the machine's video hardware when it has some (`auto`, the default) |
 | `--ffmpeg <path>` | `SUBS_FFMPEG` | The ffmpeg to render with, its ffprobe beside it; if not given, the program's own on a Mac, else the `PATH`'s |
+| `--downloads on\|off` | `SUBS_DOWNLOADS` | Download the videos subs.rocks's servers can't (`on`, the default) |
+| `--cookies on\|off` | `SUBS_COOKIES` | Let those downloads sign in with the workspace's cookies for the site (`on`, the default) |
+| `--yt-dlp <path>` | `SUBS_YTDLP` | The yt-dlp to download with; if not given, the `PATH`'s, else its pinned release, downloaded once into the data folder |
 | `--data <dir>` | `SUBS_DATA` | Its credential, fonts and work: `/data` in the image, `~/.subs-node` otherwise |
 | `--url <url>` | `SUBS_URL` | Where subs.rocks is (`https://subs.rocks`) |
 | `--log pretty\|json` | `SUBS_LOG` | Lines for people, or one JSON object a line for a log collector |
@@ -103,7 +115,7 @@ subs-node version
 
 Each machine needs its own data folder: two sharing one are one machine, and the second to connect stops the first.
 
-**Stopping.** Ctrl-C finishes the render under way, then stops; press it again to stop at once, and the render goes to another machine. A `SIGTERM` (`docker stop`) gives the render back at once.
+**Stopping.** Ctrl-C finishes the render and download under way, then stops; press it again to stop at once, and they go to another machine. A `SIGTERM` (`docker stop`) gives them back at once.
 
 ## Updating
 
@@ -138,7 +150,7 @@ node scripts/ffmpeg.ts dist/ffmpeg   # on a Mac: the ffmpeg the program brings
 
 CI builds the macOS ffmpeg for Apple silicon and Intel (once for each version of its script), runs the tests on Linux (x64 and arm64) and both Macs against the ffmpeg each renders with, and builds, installs and checks the program on each platform it's released for, as a release does; once a release is out, it installs and runs it from where people get it.
 
-`src/job.ts` and `src/protocol.ts` are what a render is and how a node and subs.rocks talk; `src/engine` makes renders, `src/agent` is `subs-node`.
+`src/job.ts` and `src/protocol.ts` are what a render and a download are and how a node and subs.rocks talk; `src/engine` makes them, `src/agent` is `subs-node`.
 
 This repository is published from subs.rocks's own, where its code is changed and tested with the rest of the product; it's here to read, build and run. Issues are welcome; for changes, open an issue first.
 

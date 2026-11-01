@@ -1,6 +1,14 @@
-import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { nvidiaGpus, trialArgs, trialSettings, vaapiName } from '../src/agent/hardware.ts';
 import {
@@ -22,6 +30,7 @@ import { duration, Output, size } from '../src/agent/output.ts';
 import { jobLine, newer } from '../src/agent/session.ts';
 import { Store } from '../src/agent/store.ts';
 import { findTools } from '../src/agent/tools.ts';
+import { findDownloader, YTDLP_RELEASE } from '../src/agent/ytdlp.ts';
 import { parallelPlan } from '../src/engine/parallel.ts';
 import type { RenderJob } from '../src/job.ts';
 import type { NodeMachine } from '../src/protocol.ts';
@@ -60,6 +69,14 @@ describe('the command line', () => {
       expect(defaultName({ SUBS_CONTAINER: '1' }, 'edit-bay')).toBe('edit-bay');
     }
     expect(parseOptions(['--name', 'Studio.local'], {}).name).toBe('Studio');
+  });
+
+  it('downloads videos for its workspace, signed in, unless told not to', () => {
+    expect(parseOptions([], {})).toMatchObject({ downloads: 'on', cookies: 'on', ytDlp: null });
+    expect(
+      parseOptions(['--cookies', 'off', '--yt-dlp', '/opt/yt-dlp'], { SUBS_DOWNLOADS: 'off' }),
+    ).toMatchObject({ downloads: 'off', cookies: 'off', ytDlp: '/opt/yt-dlp' });
+    expect(() => parseOptions(['--downloads', 'maybe'], {})).toThrow('--downloads is on or off');
   });
 
   it('says what’s wrong with what it was given', () => {
@@ -363,5 +380,67 @@ describe('its folder', () => {
     expect(statSync(join(dir, 'node.json')).mode & 0o777).toBe(0o600);
     await store.forget();
     expect(await store.credential()).toBeNull();
+  });
+
+  it('keeps the ends of a render and a download until they’re heard, as 1.3 kept one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'subs-node-pending-'));
+    const store = new Store(dir);
+    await store.prepare();
+    expect(await store.pending()).toEqual([]);
+    // A node before 1.4 kept one, a render's.
+    const released = { state: 'released' as const, ms: 0 };
+    writeFileSync(join(dir, 'pending.json'), JSON.stringify({ job: 'job_1', outcome: released }));
+    expect(await store.pending()).toEqual([{ job: 'job_1', kind: 'render', outcome: released }]);
+    await store.setPending([
+      { job: 'job_1', kind: 'render', outcome: released },
+      { job: 'job_2', kind: 'fetch', outcome: released },
+    ]);
+    expect((await store.pending()).map((each) => each.kind)).toEqual(['render', 'fetch']);
+    await store.setPending([]);
+    expect(await store.pending()).toEqual([]);
+  });
+});
+
+describe('its downloader', () => {
+  const fake = resolve(import.meta.dirname, 'fixtures/fake-yt-dlp.mjs');
+
+  it('is the one it was told, when that runs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'subs-node-ytdlp-'));
+    expect(await findDownloader(fake, dir)).toMatchObject({ ytDlp: fake, version: '2026.08.19' });
+    expect(await findDownloader('/nowhere/yt-dlp', dir)).toEqual({
+      problem: "--yt-dlp /nowhere/yt-dlp doesn't run",
+    });
+  });
+
+  it('is never a release that isn’t what its checksum says', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'subs-node-ytdlp-'));
+    const fetcher = (async () => new Response('not yt-dlp')) as unknown as typeof fetch;
+    const found = await findDownloader(null, dir, {
+      platform: 'linux-x64',
+      fetcher,
+      // As if none were on the PATH: the test machine's own isn't looked at here.
+      onPath: false,
+    });
+    expect(found).toMatchObject({
+      problem: expect.stringContaining("isn't what its release says"),
+    });
+    expect(() => statSync(join(dir, 'bin', `yt-dlp-${YTDLP_RELEASE.version}`))).toThrow();
+  });
+
+  it('is the release subs.rocks’s images have', () => {
+    // The node's own; and subs.rocks's fetcher's, beside it in subs.rocks's repository (not in the
+    // node's public one).
+    for (const file of ['../Dockerfile', '../../containers/media/Dockerfile']) {
+      const path = resolve(import.meta.dirname, file);
+      if (!existsSync(path)) continue;
+      const dockerfile = readFileSync(path, 'utf8');
+      expect(dockerfile).toContain(`YTDLP_VERSION=${YTDLP_RELEASE.version}`);
+      expect(dockerfile).toContain(
+        `YTDLP_SHA256_AMD64=${YTDLP_RELEASE.assets['linux-x64']?.sha256}`,
+      );
+      expect(dockerfile).toContain(
+        `YTDLP_SHA256_ARM64=${YTDLP_RELEASE.assets['linux-arm64']?.sha256}`,
+      );
+    }
   });
 });

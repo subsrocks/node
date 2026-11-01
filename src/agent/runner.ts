@@ -5,7 +5,14 @@ import { createInterface } from 'node:readline';
 import { isSea } from 'node:sea';
 import type { Hardware } from '../engine/hardware.ts';
 import type { MachineBudget } from '../engine/parallel.ts';
-import { EngineError, type JobFailure, type ProgressReport, RenderResult } from '../job.ts';
+import {
+  EngineError,
+  FetchError,
+  FetchResult,
+  type JobFailure,
+  type ProgressReport,
+  RenderResult,
+} from '../job.ts';
 import type { NodeJob, NodeJobOutcome } from '../protocol.ts';
 import { syncFonts } from './fonts.ts';
 import type { Output } from './output.ts';
@@ -13,15 +20,18 @@ import type { Store } from './store.ts';
 import type { Tools } from './tools.ts';
 
 /**
- * A render on this machine: the built-in fonts made current, then the engine in a process of its
- * own (this program again, `__job`), told where the job's files are and the token for them, and
- * nothing else of the node's (its credential stays here). Stopping it kills that process and every
- * ffmpeg under it. Its folder is removed when it ends, however it ends.
+ * A job on this machine, a render or a download (ADR 0092): for a render, the built-in fonts made
+ * current; then the engine in a process of its own (this program again, `__job`), told where the
+ * job's files are and the token for them, and nothing else of the node's (its credential stays
+ * here). Stopping it kills that process and every ffmpeg (or yt-dlp) under it. Its folder is
+ * removed when it ends, however it ends, with whatever cookies a download was given.
  */
 
 /** What the job's process says (`job-process.ts`). */
 export type FromJob =
   | ({ type: 'progress' } & ProgressReport)
+  /** A download's: how much of the video has come. */
+  | { type: 'fetched'; fraction: number }
   | { type: 'pieces'; pieces: number; slots: number }
   | { type: 'done'; result: unknown }
   | { type: 'failed'; error: JobFailure };
@@ -31,7 +41,7 @@ export type FromJob =
  * video hardware (as tried at start) and the threads and memory it may use.
  */
 export type ToJob = {
-  kind: 'render';
+  kind: 'render' | 'fetch';
   input: unknown;
   hardware: Hardware | null;
   budget: MachineBudget;
@@ -76,6 +86,10 @@ export function startJob(
     hardware: Hardware | null;
     budget: MachineBudget;
     onProgress: (progress: ProgressReport) => void;
+    /** A download's: how much of the video has come. */
+    onFetched?: (fraction: number) => void;
+    /** The downloader a download runs, and its JavaScript runtime (`ytdlp.ts`). */
+    downloader?: { ytDlp: string; jsRuntime: string } | null;
     /** How it starts a job's process: this program again (`__job`), unless told otherwise. */
     command?: { file: string; args: string[] };
   },
@@ -96,12 +110,15 @@ export function startJob(
     }
   };
 
+  const what = job.kind === 'fetch' ? 'download' : 'render';
   const run = async (): Promise<NodeJobOutcome> => {
-    try {
-      const downloaded = await syncFonts(server, store.fontsDir);
-      if (downloaded > 0) log.info(`Downloaded ${downloaded} built-in fonts`);
-    } catch (error) {
-      return failed(`the built-in fonts didn't download: ${String(error)}`, true, started);
+    if (job.kind === 'render') {
+      try {
+        const downloaded = await syncFonts(server, store.fontsDir);
+        if (downloaded > 0) log.info(`Downloaded ${downloaded} built-in fonts`);
+      } catch (error) {
+        return failed(`the built-in fonts didn't download: ${String(error)}`, true, started);
+      }
     }
     if (stopped) return { state: 'released', ms: Date.now() - started };
     const workDir = join(store.workDir, folderOf(job.id));
@@ -122,6 +139,8 @@ export function startJob(
             FONTS_DIR: store.fontsDir,
             FFMPEG: tools.ffmpeg,
             FFPROBE: tools.ffprobe,
+            YTDLP: context.downloader?.ytDlp ?? 'yt-dlp',
+            YTDLP_JS_RUNTIME: context.downloader?.jsRuntime ?? '',
             // Nothing of the node's own that the job doesn't need.
             SUBS_TOKEN: '',
           },
@@ -139,15 +158,22 @@ export function startJob(
               fraction: raw.fraction,
               remainingMs: raw.remainingMs,
             });
+          } else if (raw.type === 'fetched') {
+            context.onFetched?.(raw.fraction);
           } else if (raw.type === 'pieces') {
             log.info(`In ${raw.pieces} pieces, ${raw.slots} at once`);
           } else if (raw.type === 'done') {
-            const result = RenderResult.safeParse(raw.result);
+            const result = (job.kind === 'fetch' ? FetchResult : RenderResult).safeParse(
+              raw.result,
+            );
             outcome = result.success
               ? { state: 'done', ms: Date.now() - started, result: result.data }
               : failed("the engine's result didn't read", true, started);
           } else if (raw.type === 'failed') {
-            const code = EngineError.safeParse(raw.error.code).data ?? 'processing_failed';
+            const code =
+              (job.kind === 'fetch'
+                ? FetchError.safeParse(raw.error.code).data
+                : EngineError.safeParse(raw.error.code).data) ?? 'processing_failed';
             outcome = {
               state: 'failed',
               ms: Date.now() - started,
@@ -156,7 +182,7 @@ export function startJob(
           }
         });
         process_.on('error', (error) => {
-          resolve(failed(`the render didn't start: ${error.message}`, true, started));
+          resolve(failed(`the ${what} didn't start: ${error.message}`, true, started));
         });
         process_.on('exit', (code, signal) => {
           if (stopped === 'release') resolve({ state: 'released', ms: Date.now() - started });
@@ -164,7 +190,7 @@ export function startJob(
           else if (outcome) resolve(outcome);
           else {
             const how = signal ? `was killed (${signal})` : `exited with ${code}`;
-            resolve(failed(`the render's process ${how}`, true, started));
+            resolve(failed(`the ${what}'s process ${how}`, true, started));
           }
         });
         const message: ToJob = {

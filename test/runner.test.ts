@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -14,7 +14,7 @@ import { findTools } from '../src/agent/tools.ts';
 import { config } from '../src/engine/config.ts';
 import { renderInParallel } from '../src/engine/parallel.ts';
 import { render } from '../src/engine/render.ts';
-import type { ProgressReport, RenderJob } from '../src/job.ts';
+import type { FetchJob, ProgressReport, RenderJob } from '../src/job.ts';
 import type { NodeJob } from '../src/protocol.ts';
 
 /**
@@ -238,6 +238,92 @@ describe('a render on this machine', () => {
     });
     running.stop('release');
     expect(await running.ended).toMatchObject({ state: 'released' });
+  });
+
+  it('downloads a linked video, signed in with the cookies its token reads, and writes it back', async () => {
+    const store = new Store(join(work, 'node-fetch'));
+    await store.prepare();
+    process.env['FAKE_VIDEO'] = join(work, 'original.mp4');
+    files.set(
+      'cookies.txt',
+      Buffer.from('# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tx\n'),
+    );
+    const fetched: number[] = [];
+    const download: NodeJob = {
+      id: 'job_fetch',
+      kind: 'fetch',
+      token: TOKEN,
+      input: {
+        url: 'https://www.bilibili.com/video/BV1x',
+        quality: 1080,
+        cookies: null,
+        cookiesFile: { key: 'cookies.txt' },
+        output: { key: 'video' },
+        progress: { key: 'progress.json' },
+      } satisfies FetchJob,
+    };
+    const outcome = await startJob(download, {
+      server: origin,
+      store,
+      log: quiet,
+      tools,
+      hardware: null,
+      budget: { threads: 4, memoryBytes: 8 * 1024 ** 3 },
+      downloader: {
+        ytDlp: resolve(import.meta.dirname, 'fixtures/fake-yt-dlp.mjs'),
+        jsRuntime: '',
+      },
+      onProgress: () => undefined,
+      onFetched: (fraction) => fetched.push(fraction),
+      command,
+    }).ended;
+    expect(outcome).toMatchObject({
+      state: 'done',
+      result: {
+        output: { key: 'video', mime: 'video/mp4' },
+        info: { title: 'A video, signed in', site: 'bilibili.com', width: 320, height: 240 },
+      },
+    });
+    expect(files.get('video')?.equals(files.get('original') ?? Buffer.alloc(0))).toBe(true);
+    expect(fetched.length).toBeGreaterThan(0);
+    // Its folder goes with it, the cookies in it.
+    expect(() => statSync(join(store.workDir, 'job_fetch'))).toThrow();
+  });
+
+  it('says a site turned it away, as the site said it', async () => {
+    const store = new Store(join(work, 'node-refused'));
+    await store.prepare();
+    const outcome = await startJob(
+      {
+        id: 'job_refused',
+        kind: 'fetch',
+        token: TOKEN,
+        input: {
+          url: 'https://www.bilibili.com/video/refused',
+          cookies: null,
+          output: { key: 'video-2' },
+          progress: { key: 'progress.json' },
+        },
+      },
+      {
+        server: origin,
+        store,
+        log: quiet,
+        tools,
+        hardware: null,
+        budget: { threads: 4, memoryBytes: 8 * 1024 ** 3 },
+        downloader: {
+          ytDlp: resolve(import.meta.dirname, 'fixtures/fake-yt-dlp.mjs'),
+          jsRuntime: '',
+        },
+        onProgress: () => undefined,
+        command,
+      },
+    ).ended;
+    expect(outcome).toMatchObject({
+      state: 'failed',
+      error: { code: 'source_refused', retryable: false },
+    });
   });
 
   it('is made in pieces at once where it’s told to, joined frame for frame, with its sound', async () => {

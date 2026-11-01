@@ -13,6 +13,7 @@ export const COMMANDS = ['start', 'doctor', 'status', 'remove', 'version', 'help
 export type Command = (typeof COMMANDS)[number];
 
 export type GpuUse = 'auto' | 'off';
+export type OnOff = 'on' | 'off';
 
 export type Options = {
   command: Command;
@@ -28,11 +29,20 @@ export type Options = {
   gpu: GpuUse;
   /** The ffmpeg to render with (its ffprobe beside it), or null to find one (`tools.ts`). */
   ffmpeg: string | null;
+  /**
+   * Whether it downloads linked videos our servers can't for its workspace (ADR 0092), and
+   * whether those downloads may sign in with the workspace's cookies for the site.
+   */
+  downloads: OnOff;
+  cookies: OnOff;
+  /** The yt-dlp to download with, or null to find one (`ytdlp.ts`). */
+  ytDlp: string | null;
 };
 
 export class UsageError extends Error {}
 
-export const USAGE = `subs-node: render subs.rocks videos on this machine
+export const USAGE = `subs-node: render subs.rocks videos on this machine, and download the ones
+subs.rocks's servers can't
 
 Usage
   subs-node [start] --token <token>     join a workspace and wait for renders
@@ -48,6 +58,11 @@ Options
   --gpu auto|off    encode on an NVIDIA GPU when there is one (SUBS_GPU, default auto)
   --ffmpeg <path>   the ffmpeg to render with, its ffprobe beside it (SUBS_FFMPEG); found if not
                     given: Homebrew's ffmpeg-full on a Mac, else the PATH's
+  --downloads on|off  download linked videos subs.rocks's servers can't (SUBS_DOWNLOADS, default on)
+  --cookies on|off  let those downloads sign in with the workspace's cookies for the site
+                    (SUBS_COOKIES, default on)
+  --yt-dlp <path>   the yt-dlp to download with (SUBS_YTDLP); found if not given: the PATH's, else
+                    its pinned release, downloaded once into the data folder
   --url <url>       where subs.rocks is (SUBS_URL, default https://subs.rocks)
   --data <dir>      where it keeps its credential, fonts and work (SUBS_DATA)
   --log pretty|json how it writes its log (SUBS_LOG, default pretty)
@@ -125,6 +140,13 @@ export function parseOptions(argv: readonly string[], env: NodeJS.ProcessEnv): O
   const gpu = values.gpu ?? env['SUBS_GPU'] ?? 'auto';
   if (gpu !== 'auto' && gpu !== 'off') throw new UsageError('--gpu is auto or off');
   const name = machineName(values.name ?? env['SUBS_NAME'] ?? defaultName(env));
+  const onOff = (flag: string, value: string | undefined): OnOff => {
+    const given = value ?? 'on';
+    if (given !== 'on' && given !== 'off') throw new UsageError(`--${flag} is on or off`);
+    return given;
+  };
+  const downloads = onOff('downloads', values.downloads ?? env['SUBS_DOWNLOADS']);
+  const cookies = onOff('cookies', values.cookies ?? env['SUBS_COOKIES']);
   return {
     command: first as Command,
     server: serverUrl(values.url ?? env['SUBS_URL'] ?? 'https://subs.rocks'),
@@ -135,6 +157,9 @@ export function parseOptions(argv: readonly string[], env: NodeJS.ProcessEnv): O
     name,
     gpu,
     ffmpeg: values.ffmpeg ?? env['SUBS_FFMPEG'] ?? null,
+    downloads,
+    cookies,
+    ytDlp: values['yt-dlp'] ?? env['SUBS_YTDLP'] ?? null,
   };
 }
 
@@ -143,6 +168,9 @@ const OPTIONS = {
   name: { type: 'string' },
   gpu: { type: 'string' },
   ffmpeg: { type: 'string' },
+  downloads: { type: 'string' },
+  cookies: { type: 'string' },
+  'yt-dlp': { type: 'string' },
   url: { type: 'string' },
   data: { type: 'string' },
   log: { type: 'string' },
@@ -161,5 +189,8 @@ function base(env: NodeJS.ProcessEnv): Omit<Options, 'command'> {
     name: hostname(),
     gpu: 'auto',
     ffmpeg: null,
+    downloads: 'on',
+    cookies: 'on',
+    ytDlp: null,
   };
 }

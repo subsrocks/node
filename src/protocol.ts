@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import {
+  FetchJob,
+  FetchResult,
   HardwareFeature,
   HardwareKind,
   JobFailure,
@@ -11,12 +13,14 @@ import {
 /**
  * How a node and subs.rocks talk. A node registers once with a token from its workspace's
  * settings, keeps the credential it's given, then holds a WebSocket open to subs.rocks, which
- * sends it renders one at a time. The node reads and writes a render's files over HTTPS with a
- * token for that render alone, and reports how it ended over the socket.
+ * sends it renders one at a time, and (a node that says it can) downloads of linked videos our
+ * servers couldn't make, one at a time beside them (ADR 0092). The node reads and writes a job's
+ * files over HTTPS with a token for that job alone, and reports how it ended over the socket.
  *
- * Everything a node is told is here: a render's job names its files by the job's own names
- * (`original`, `subtitles.ass`), never by where subs.rocks keeps them, and carries nothing about
- * the project or the people in it.
+ * Everything a node is told is here: a job names its files by the job's own names (`original`,
+ * `subtitles.ass`; a download's `video`, `cookies.txt`), never by where subs.rocks keeps them, and
+ * carries nothing about the project or the people in it. A download's is the video's address,
+ * and, when the workspace has them and the node takes them, its cookies for the site.
  *
  *   POST {server}/api/nodes/register      RegisterNodeInput → RegisterNodeResult
  *   GET  {server}/api/nodes/self          the node as subs.rocks knows it (NodeSelf), or why not
@@ -140,12 +144,20 @@ export const NODE_REFUSALS = [
 ] as const;
 export type NodeRefusal = (typeof NODE_REFUSALS)[number];
 
-/** How a job ended on the node: made, failed, or given back unfinished when the node stopped. */
+/** The kinds of job a node takes: renders, and downloads of linked videos (ADR 0092). */
+export const NODE_JOB_KINDS = ['render', 'fetch'] as const;
+export const NodeJobKind = z.enum(NODE_JOB_KINDS);
+export type NodeJobKind = z.infer<typeof NodeJobKind>;
+
+/**
+ * How a job ended on the node: made (a render's result, or a download's), failed, or given back
+ * unfinished when the node stopped.
+ */
 export const NodeJobOutcome = z.discriminatedUnion('state', [
   z.strictObject({
     state: z.literal('done'),
     ms: z.number().nonnegative(),
-    result: RenderResult,
+    result: z.union([RenderResult, FetchResult]),
   }),
   z.strictObject({
     state: z.literal('failed'),
@@ -169,8 +181,21 @@ export const NodeMessage = z.discriminatedUnion('type', [
     engine: z.number().int(),
     version: z.string().max(40),
     machine: NodeMachine,
+    /** The render it's still making, if it is. */
     job: JobRef.nullable(),
-    /** It takes no new job: it's stopping once its job is done. */
+    /**
+     * The kinds of job it takes (ADR 0092): `fetch` when it has a downloader. Absent from nodes
+     * before 1.4, which take renders only.
+     */
+    takes: z.array(NodeJobKind).max(4).optional(),
+    /**
+     * Its downloads may sign in with the workspace's cookies for the site (`--cookies`, on unless
+     * its owner says otherwise). Absent: they may.
+     */
+    signsIn: z.boolean().optional(),
+    /** The download it's still making, beside its render, if it is (1.4 on). */
+    fetching: JobRef.nullable().optional(),
+    /** It takes no new job: it's stopping once its jobs are done. */
     draining: z.boolean(),
   }),
   /** It took a job it was sent and is working on it. */
@@ -182,14 +207,25 @@ export const NodeMessage = z.discriminatedUnion('type', [
 ]);
 export type NodeMessage = z.infer<typeof NodeMessage>;
 
-/** A render for the node: its job, and the token its files are read and written with. */
-export const NodeJob = z.object({
-  id: JobRef,
-  kind: z.literal('render'),
-  input: RenderJob,
-  /** For this job's files only, while it's this node's (`?token=` on `/api/nodes/io`). */
-  token: z.string().min(1).max(300),
-});
+/**
+ * A job for the node: a render, or a download (sent only to a node that takes them), and the token
+ * its files are read and written with: for this job's files only, while it's this node's (`?token=`
+ * on `/api/nodes/io`).
+ */
+export const NodeJob = z.discriminatedUnion('kind', [
+  z.object({
+    id: JobRef,
+    kind: z.literal('render'),
+    input: RenderJob,
+    token: z.string().min(1).max(300),
+  }),
+  z.object({
+    id: JobRef,
+    kind: z.literal('fetch'),
+    input: FetchJob,
+    token: z.string().min(1).max(300),
+  }),
+]);
 export type NodeJob = z.infer<typeof NodeJob>;
 
 /** What subs.rocks says, as JSON text frames. */

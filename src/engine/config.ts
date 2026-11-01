@@ -13,4 +13,11 @@ export const config = {
   ffprobe: process.env['FFPROBE'] ?? 'ffprobe',
   /** The built-in fonts renders draw with when a template doesn't bring its own. */
   fontsDir: process.env['FONTS_DIR'] ?? '/app/fonts',
+  /** The downloader linked videos come by (ADR 0092: on a node too). */
+  ytDlp: process.env['YTDLP'] ?? 'yt-dlp',
+  /**
+   * The JavaScript runtime yt-dlp solves YouTube's challenges with (`node` in the images); empty,
+   * none (a machine without one).
+   */
+  ytDlpJsRuntime: process.env['YTDLP_JS_RUNTIME'] ?? 'node',
 };

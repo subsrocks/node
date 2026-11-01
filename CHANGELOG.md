@@ -2,6 +2,12 @@
 
 What changed in each release of the node, for whoever runs one. A release is published as `ghcr.io/subsrocks/node:<version>` and as programs on GitHub Releases.
 
+## 1.4.0
+
+- Downloads the videos a workspace imports by their address when a site turns subs.rocks's servers away (Bilibili refuses data centers; YouTube asks them to sign in now and then): one at a time, beside its render, from where the machine is. With yt-dlp, the downloader subs.rocks runs: the image has it, the program uses the `PATH`'s or downloads its pinned release once into the data folder, checked by SHA-256. `--yt-dlp` names another; `--downloads off` takes none.
+- A download signs in with the workspace's cookies for the site, when it has some, read only while the download is the machine's and gone with its folder after. `--cookies off` never does.
+- Ctrl-C finishes the render and the download under way; the ends of both are kept on disk until subs.rocks hears them.
+
 ## 1.3.0
 
 - On an NVIDIA card, a preset's constant quality (CRF) makes what the processor's encoders make at that number. NVENC is given the CRF plus seven, where it was measured to match x264 and x265; the same number asked it for near-lossless, and files 1.5 to 1.7 times as big.

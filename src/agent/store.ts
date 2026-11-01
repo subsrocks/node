@@ -1,11 +1,11 @@
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { NodeJobOutcome } from '../protocol.ts';
+import { NodeJobKind, NodeJobOutcome } from '../protocol.ts';
 
 /**
- * The node's folder (`--data`): its credential, a job's end it hasn't been able to report yet,
- * the built-in fonts, and a folder per job while it renders. In the image it's the `/data` volume,
+ * The node's folder (`--data`): its credential, the jobs' ends it hasn't been able to report yet,
+ * the built-in fonts, its yt-dlp when it fetched one, and a folder per job while it works. In the image it's the `/data` volume,
  * so the node keeps its place in the workspace across restarts and updates.
  */
 
@@ -18,9 +18,18 @@ const Credential = z.object({
 });
 export type Credential = z.infer<typeof Credential>;
 
-/** A job's end, kept until subs.rocks acknowledges it, so a restart can't lose a finished render. */
-const Pending = z.object({ job: z.string(), outcome: NodeJobOutcome });
+/**
+ * A job's end, kept until subs.rocks acknowledges it, so a restart can't lose a finished render
+ * or download. Its kind, from 1.4 (before, a render's).
+ */
+const Pending = z.object({
+  job: z.string(),
+  kind: NodeJobKind.default('render'),
+  outcome: NodeJobOutcome,
+});
 export type Pending = z.infer<typeof Pending>;
+/** Each job's end not yet heard, a render's and a download's; one alone, as before 1.4. */
+const Pendings = z.union([z.array(Pending).max(8), Pending.transform((one) => [one])]);
 
 export class Store {
   readonly dir: string;
@@ -81,12 +90,12 @@ export class Store {
     await rm(join(this.dir, 'pending.json'), { force: true });
   }
 
-  pending(): Promise<Pending | null> {
-    return this.read('pending.json', Pending);
+  async pending(): Promise<Pending[]> {
+    return (await this.read('pending.json', Pendings)) ?? [];
   }
 
-  async setPending(pending: Pending | null): Promise<void> {
-    if (pending === null) await rm(join(this.dir, 'pending.json'), { force: true });
+  async setPending(pending: readonly Pending[]): Promise<void> {
+    if (pending.length === 0) await rm(join(this.dir, 'pending.json'), { force: true });
     else await this.write('pending.json', pending);
   }
 }

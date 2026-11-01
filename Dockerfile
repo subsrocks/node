@@ -1,5 +1,5 @@
-# The subs.rocks node: ffmpeg (with libass, x264, x265, SVT-AV1, NVENC and VA-API) and Node.js,
-# running `subs-node`. Debian trixie's ffmpeg, the one subs.rocks's own render machines run, so a
+# The subs.rocks node: ffmpeg (with libass, x264, x265, SVT-AV1, NVENC and VA-API), yt-dlp (for
+# the linked videos subs.rocks's servers can't download) and Node.js, running `subs-node`. Debian trixie's ffmpeg, the one subs.rocks's own render machines run, so a
 # render made here draws its subtitles exactly as one made there.
 #
 #   docker build -t subs-node .
@@ -26,6 +26,28 @@ RUN pnpm run build
 
 FROM ${NODE_IMAGE} AS node
 
+# yt-dlp's official self-contained build (Python inside), pinned and checked against the release's
+# checksums: the release `src/agent/ytdlp.ts` names, which a node outside the image fetches for
+# itself (a test keeps the two the same).
+FROM ${RUNTIME_IMAGE} AS ytdlp
+ARG TARGETARCH
+ARG YTDLP_VERSION=2026.08.19
+ARG YTDLP_SHA256_AMD64=58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a
+ARG YTDLP_SHA256_ARM64=b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) asset=yt-dlp_linux; sum="${YTDLP_SHA256_AMD64}" ;; \
+      arm64) asset=yt-dlp_linux_aarch64; sum="${YTDLP_SHA256_ARM64}" ;; \
+      *) echo "no yt-dlp build for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 -o /yt-dlp \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${asset}"; \
+    echo "${sum}  /yt-dlp" | sha256sum -c -; \
+    chmod 0755 /yt-dlp
+
 FROM ${RUNTIME_IMAGE}
 ARG TARGETARCH
 # VA-API's drivers, for Intel's and AMD's graphics: Mesa's (AMD), and on amd64 Intel's, whose full
@@ -36,6 +58,7 @@ RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.li
     $([ "${TARGETARCH}" = amd64 ] && echo intel-media-va-driver-non-free) \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=ytdlp /yt-dlp /usr/local/bin/yt-dlp
 COPY --from=build /node/dist/subs-node.mjs /app/subs-node.mjs
 COPY LICENSE /app/LICENSE
 COPY scripts/entrypoint.sh /app/entrypoint.sh
