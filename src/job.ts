@@ -202,6 +202,12 @@ export type WrittenFile = z.infer<typeof WrittenFile>;
  */
 export const RenderJob = z.object({
   input: ObjectRef,
+  /**
+   * The original's version in storage (`bytes:etag`, which changes whenever the file does), for a
+   * node that keeps the originals it has read to know its copy is this one (ADR 0093). Absent, it
+   * reads storage.
+   */
+  inputVersion: z.string().max(240).optional(),
   subtitles: ObjectRef,
   /** The workspace's font files the template names; the built-in fonts come with the engine. */
   fonts: z.array(ObjectRef).max(50),

@@ -78,6 +78,15 @@ When subs.rocks's own downloader is turned away from a video (Bilibili refuses d
 - **With [`yt-dlp`](https://github.com/yt-dlp/yt-dlp)**, the downloader subs.rocks runs, with the same arguments (`src/engine/fetch.ts`). The image has it; the program uses the `PATH`'s, or downloads the release named in `src/agent/ytdlp.ts` once into its data folder, checked against that release's SHA-256 before it's ever run. YouTube's challenges are solved with the machine's `node` (or `deno`) when it has one.
 - **Signed in, where the workspace has cookies for the site** (YouTube's, Bilibili's) and you let it: read only while it's downloading that video, written to the job's own folder, which goes when the job does. `--cookies off` never signs in; `--downloads off` takes no downloads.
 
+## What it keeps
+
+So the next render of a video doesn't bring it over again, it keeps the originals its renders read and the videos it downloaded, in `originals/` in its data folder:
+
+- **Known by their version in subs.rocks's storage** (size and ETag, `inputVersion` in the job), which changes whenever the file does: a video replaced there isn't found here, and is read again.
+- **Checked before every use,** against the SHA-256 it took when it kept it. A damaged copy is dropped, and the video read from storage. The file a render burns subtitles into is byte for byte the one they were timed to, not a second download from the video's site.
+- **Bounded:** up to 50 GB (`--keep-originals`; `off` keeps none), the used longest ago going first; 30 days since each was last used; never leaving less than 20 GB free (`--keep-free`).
+- **Gone when it leaves its workspace** (`subs-node remove`, or removed in Settings). A video deleted in subs.rocks stays here until one of the limits above takes it.
+
 ## What it sees
 
 A node is a machine you run, so subs.rocks tells it only what a render or a download needs:
@@ -108,7 +117,9 @@ subs-node version
 | `--downloads on\|off` | `SUBS_DOWNLOADS` | Download the videos subs.rocks's servers can't (`on`, the default) |
 | `--cookies on\|off` | `SUBS_COOKIES` | Let those downloads sign in with the workspace's cookies for the site (`on`, the default) |
 | `--yt-dlp <path>` | `SUBS_YTDLP` | The yt-dlp to download with; if not given, the `PATH`'s, else its pinned release, downloaded once into the data folder |
-| `--data <dir>` | `SUBS_DATA` | Its credential, fonts and work: `/data` in the image, `~/.subs-node` otherwise |
+| `--keep-originals <GB>\|off` | `SUBS_KEEP_ORIGINALS` | How much of the videos it reads it keeps for its next renders (`50`, the default) |
+| `--keep-free <GB>` | `SUBS_KEEP_FREE` | Never keep them at the cost of this much free disk (`20`, the default) |
+| `--data <dir>` | `SUBS_DATA` | Its credential, fonts, work and the videos it keeps: `/data` in the image, `~/.subs-node` otherwise |
 | `--url <url>` | `SUBS_URL` | Where subs.rocks is (`https://subs.rocks`) |
 | `--log pretty\|json` | `SUBS_LOG` | Lines for people, or one JSON object a line for a log collector |
 | `--verbose` | `SUBS_VERBOSE=1` | Say more: the engine's own lines too |

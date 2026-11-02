@@ -110,35 +110,44 @@ async function request(
   throw new JobError('processing_failed', `${what} failed: ${failure}`, true);
 }
 
-/** Streams a local file to storage, in parts when it's large; returns what was written. */
+/** The ETag a write answers with, when the storage host says it (a host before ADR 0093 doesn't). */
+async function etagOf(response: Response): Promise<string | null> {
+  const body = (await response.json().catch(() => null)) as { etag?: unknown } | null;
+  return typeof body?.etag === 'string' ? body.etag : null;
+}
+
+/**
+ * Streams a local file to storage, in parts when it's large; returns what was written, and, where
+ * the host says it, its ETag there, which with its size is its version (`RenderJob.inputVersion`).
+ */
 export async function putFile(
   path: string,
   key: string,
   mime: string,
   options: IoOptions = {},
-): Promise<WrittenFile> {
+): Promise<WrittenFile & { etag?: string }> {
   const partBytes = options.partBytes ?? PART_BYTES;
   const delays = options.retryDelaysMs ?? RETRY_DELAYS_MS;
   const { size } = await stat(path);
   const sha256 = await sha256File(path);
   const counted = sentBytes(size, options.onBytes);
-  if (size > partBytes) {
-    await putParts(path, key, mime, size, partBytes, delays, counted);
-  } else {
-    await request(`storing ${key}`, delays, () => [
-      objectUrl(key),
-      {
-        method: 'PUT',
-        headers: {
-          'Content-Type': mime,
-          'Content-Length': String(size),
-          'X-Content-SHA256': sha256,
-        },
-        ...fileBody(path, undefined, counted(0)),
-      },
-    ]);
-  }
-  return { key, bytes: size, sha256, mime };
+  const stored =
+    size > partBytes
+      ? await putParts(path, key, mime, size, partBytes, delays, counted)
+      : await request(`storing ${key}`, delays, () => [
+          objectUrl(key),
+          {
+            method: 'PUT',
+            headers: {
+              'Content-Type': mime,
+              'Content-Length': String(size),
+              'X-Content-SHA256': sha256,
+            },
+            ...fileBody(path, undefined, counted(0)),
+          },
+        ]);
+  const etag = await etagOf(stored);
+  return { key, bytes: size, sha256, mime, ...(etag ? { etag } : {}) };
 }
 
 /**
@@ -153,7 +162,7 @@ async function putParts(
   partBytes: number,
   delays: readonly number[],
   counted: ReturnType<typeof sentBytes>,
-): Promise<void> {
+): Promise<Response> {
   const started = await request(`starting ${key} in parts`, delays, () => [
     objectUrl(key, { uploads: '' }),
     { method: 'POST', headers: { 'Content-Type': mime } },
@@ -197,7 +206,7 @@ async function putParts(
   try {
     if (refused) throw refused.reason;
     parts.sort((a, b) => a.partNumber - b.partNumber);
-    await request(`finishing ${key}`, delays, () => [
+    return await request(`finishing ${key}`, delays, () => [
       objectUrl(key, { uploadId }),
       {
         method: 'POST',

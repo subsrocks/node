@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve as resolve_ } from 'node:path';
 import { createInterface } from 'node:readline';
 import { isSea } from 'node:sea';
 import type { Hardware } from '../engine/hardware.ts';
@@ -15,6 +15,7 @@ import {
 } from '../job.ts';
 import type { NodeJob, NodeJobOutcome } from '../protocol.ts';
 import { syncFonts } from './fonts.ts';
+import type { Originals } from './originals.ts';
 import type { Output } from './output.ts';
 import type { Store } from './store.ts';
 import type { Tools } from './tools.ts';
@@ -24,7 +25,8 @@ import type { Tools } from './tools.ts';
  * current; then the engine in a process of its own (this program again, `__job`), told where the
  * job's files are and the token for them, and nothing else of the node's (its credential stays
  * here). Stopping it kills that process and every ffmpeg (or yt-dlp) under it. Its folder is
- * removed when it ends, however it ends, with whatever cookies a download was given.
+ * removed when it ends, however it ends, with whatever cookies a download was given; a whole
+ * original in it, read for a render or downloaded, is kept for the next render first (ADR 0093).
  */
 
 /** What the job's process says (`job-process.ts`). */
@@ -32,6 +34,8 @@ export type FromJob =
   | ({ type: 'progress' } & ProgressReport)
   /** A download's: how much of the video has come. */
   | { type: 'fetched'; fraction: number }
+  /** A download's: the video stored, where it is here, and its version in storage. */
+  | { type: 'stored'; path: string; version: string }
   | { type: 'pieces'; pieces: number; slots: number }
   | { type: 'done'; result: unknown }
   | { type: 'failed'; error: JobFailure };
@@ -43,6 +47,8 @@ export type FromJob =
 export type ToJob = {
   kind: 'render' | 'fetch';
   input: unknown;
+  /** The original, where the machine already has it (`originals.ts`). */
+  original?: string;
   hardware: Hardware | null;
   budget: MachineBudget;
 };
@@ -90,6 +96,8 @@ export function startJob(
     onFetched?: (fraction: number) => void;
     /** The downloader a download runs, and its JavaScript runtime (`ytdlp.ts`). */
     downloader?: { ytDlp: string; jsRuntime: string } | null;
+    /** The originals this machine keeps (`originals.ts`), unless it was told not to. */
+    originals?: Originals | null;
     /** How it starts a job's process: this program again (`__job`), unless told otherwise. */
     command?: { file: string; args: string[] };
   },
@@ -124,6 +132,14 @@ export function startJob(
     const workDir = join(store.workDir, folderOf(job.id));
     await rm(workDir, { recursive: true, force: true });
     await mkdir(workDir, { recursive: true });
+    // A render of an original this machine has: its own copy, not storage's.
+    const version = job.kind === 'render' ? job.input.inputVersion : undefined;
+    const copy = join(workDir, 'original');
+    const own =
+      version && context.originals ? await context.originals.linkInto(version, copy) : false;
+    if (own) log.info('Using its own copy of the video');
+    // A video it downloaded, with its version once it's stored.
+    let downloaded: { path: string; version: string } | null = null;
     try {
       return await new Promise<NodeJobOutcome>((resolve) => {
         const command = context.command ?? self('__job');
@@ -160,6 +176,11 @@ export function startJob(
             });
           } else if (raw.type === 'fetched') {
             context.onFetched?.(raw.fraction);
+          } else if (raw.type === 'stored') {
+            // Only ever a file of its own folder.
+            if (resolve_(raw.path).startsWith(`${resolve_(workDir)}/`)) {
+              downloaded = { path: raw.path, version: raw.version };
+            }
           } else if (raw.type === 'pieces') {
             log.info(`In ${raw.pieces} pieces, ${raw.slots} at once`);
           } else if (raw.type === 'done') {
@@ -196,6 +217,7 @@ export function startJob(
         const message: ToJob = {
           kind: job.kind,
           input: job.input,
+          ...(own ? { original: copy } : {}),
           hardware: context.hardware,
           budget: context.budget,
         };
@@ -203,6 +225,15 @@ export function startJob(
         if (stopped) kill();
       });
     } finally {
+      // A whole original the job brought here (a part isn't kept), before its folder goes.
+      if (context.originals) {
+        const kept = version && !own ? { path: copy, version } : downloaded;
+        if (kept) {
+          await context.originals
+            .take(kept.version, kept.path)
+            .catch((error: unknown) => log.debug(`A video wasn't kept: ${String(error)}`));
+        }
+      }
       await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }
   };

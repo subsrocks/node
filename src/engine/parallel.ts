@@ -173,7 +173,13 @@ async function inTurn(
  * How a machine makes a render: its hardware, if any, and what it has; `plan`, a plan of its own
  * instead of `parallelPlan`'s, however short the render (the tests make small ones in pieces).
  */
-export type ParallelOptions = { hardware?: Hardware; machine: MachineBudget; plan?: ParallelPlan };
+export type ParallelOptions = {
+  hardware?: Hardware;
+  machine: MachineBudget;
+  plan?: ParallelPlan;
+  /** The original where the machine already has it (a node's own copy, ADR 0093): not read again. */
+  original?: string;
+};
 
 /**
  * Burns the subtitles into the original as `render` does, in pieces at once where the machine
@@ -191,12 +197,15 @@ export async function renderInParallel(
   const wholly = () =>
     render(job, workDir, hooks, {
       ...(options.hardware ? { hardware: options.hardware } : {}),
+      ...(options.original ? { original: options.original } : {}),
       threads: machine.threads,
     });
   const { grid } = job;
   if (!grid || (!options.plan && job.durationMs < PARALLEL_FROM_MS)) return wholly();
   // Planned before the original is copied: a render made whole copies it itself.
-  const frame = options.plan ? null : (settings.size ?? (await frameOf(objectUrl(job.input.key))));
+  const frame = options.plan
+    ? null
+    : (settings.size ?? (await frameOf(options.original ?? objectUrl(job.input.key))));
   const plan =
     options.plan ??
     parallelPlan(job, machine, on, frame ? frame.width * frame.height : 3840 * 2160);
@@ -212,7 +221,8 @@ export async function renderInParallel(
   const preparing = bytesStage('preparing', write);
   const env = await prepareRender(job, workDir);
   // A copy of the original where there's room for it too, which every piece reads.
-  const input = await originalInput(job.input.key, workDir, () => room, preparing.io);
+  const input =
+    options.original ?? (await originalInput(job.input.key, workDir, () => room, preparing.io));
   await preparing.settle();
   log('info', 'render in pieces', {
     slots: plan.slots,

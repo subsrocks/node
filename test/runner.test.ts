@@ -1,12 +1,20 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, beforeAll, expect, it, describe as suite } from 'vitest';
+import { afterAll, beforeAll, expect, it, describe as suite, vi } from 'vitest';
 import { findHardware } from '../src/agent/hardware.ts';
 import { capture, listedNames } from '../src/agent/machine.ts';
+import { Originals } from '../src/agent/originals.ts';
 import { Output } from '../src/agent/output.ts';
 import { startJob } from '../src/agent/runner.ts';
 import { Store } from '../src/agent/store.ts';
@@ -39,6 +47,8 @@ const TOKEN = 'node_test.secret';
 const work = mkdtempSync(join(tmpdir(), 'subs-node-runner-'));
 const files = new Map<string, Buffer>();
 const progress: string[] = [];
+/** How many times each file was read, to tell a copy of its own from storage. */
+const reads = new Map<string, number>();
 let server: Server;
 let origin = '';
 
@@ -112,9 +122,10 @@ beforeAll(async () => {
       if (name === 'progress.json') progress.push(bytes.toString());
       else files.set(name, bytes);
       response.writeHead(201, { 'Content-Type': 'application/json' });
-      response.end('{}');
+      response.end(JSON.stringify({ etag: `etag-of-${name}` }));
       return;
     }
+    if (request.method === 'GET') reads.set(name, (reads.get(name) ?? 0) + 1);
     const stored = files.get(name);
     if (!stored) {
       response.writeHead(404).end();
@@ -134,12 +145,13 @@ afterAll(async () => {
   await new Promise((done) => server.close(done));
 });
 
-const job = (token = TOKEN): NodeJob => ({
+const job = (token = TOKEN, version?: string): NodeJob => ({
   id: 'job_test',
   kind: 'render',
   token,
   input: {
     input: { key: 'original' },
+    ...(version ? { inputVersion: version } : {}),
     subtitles: { key: 'subtitles.ass' },
     fonts: [],
     output: { key: 'render.mp4' },
@@ -326,6 +338,135 @@ describe('a render on this machine', () => {
     });
   });
 
+  it('keeps the original it read: the next render of that version reads nothing from storage', async () => {
+    const store = new Store(join(work, 'node-keep'));
+    await store.prepare();
+    const originals = new Originals(
+      store.originalsDir,
+      { maxBytes: 1e9, maxAgeMs: 60_000, freeBytes: 0 },
+      quiet,
+    );
+    await originals.prepare();
+    const version = `${files.get('original')?.byteLength}:abc`;
+    const context = {
+      server: origin,
+      store,
+      log: quiet,
+      tools,
+      hardware: null,
+      budget: { threads: 4, memoryBytes: 8 * 1024 ** 3 },
+      originals,
+      onProgress: () => undefined,
+      command,
+    };
+    reads.clear();
+    expect(await startJob(job(TOKEN, version), context).ended).toMatchObject({ state: 'done' });
+    expect(reads.get('original')).toBeGreaterThan(0);
+    await vi.waitFor(async () => expect((await originals.size()).videos).toBe(1));
+
+    reads.clear();
+    const heard: ProgressReport[] = [];
+    const second = await startJob(job(TOKEN, version), {
+      ...context,
+      onProgress: (report) => heard.push(report),
+    }).ended;
+    expect(second).toMatchObject({ state: 'done', result: { width: 320, height: 240 } });
+    expect(reads.get('original')).toBeUndefined();
+    expect(heard.some((report) => report.stage === 'encoding')).toBe(true);
+    // Its folder went with the job; its copy didn't.
+    expect(await originals.size()).toEqual({
+      videos: 1,
+      bytes: files.get('original')?.byteLength,
+    });
+
+    // The video replaced in storage: another version, read again.
+    reads.clear();
+    await startJob(job(TOKEN, `${files.get('original')?.byteLength}:def`), context).ended;
+    expect(reads.get('original')).toBeGreaterThan(0);
+  });
+
+  it('keeps the video it downloaded: its first render reads nothing from storage', async () => {
+    const store = new Store(join(work, 'node-downloaded'));
+    await store.prepare();
+    const originals = new Originals(
+      store.originalsDir,
+      { maxBytes: 1e9, maxAgeMs: 60_000, freeBytes: 0 },
+      quiet,
+    );
+    await originals.prepare();
+    process.env['FAKE_VIDEO'] = join(work, 'original.mp4');
+    const context = {
+      server: origin,
+      store,
+      log: quiet,
+      tools,
+      hardware: null,
+      budget: { threads: 4, memoryBytes: 8 * 1024 ** 3 },
+      downloader: {
+        ytDlp: resolve(import.meta.dirname, 'fixtures/fake-yt-dlp.mjs'),
+        jsRuntime: '',
+      },
+      originals,
+      onProgress: () => undefined,
+      command,
+    };
+    const download = await startJob(
+      {
+        id: 'job_kept_download',
+        kind: 'fetch',
+        token: TOKEN,
+        input: {
+          url: 'https://www.bilibili.com/video/BV1kept',
+          cookies: null,
+          output: { key: 'kept-video' },
+          progress: { key: 'progress.json' },
+        },
+      },
+      context,
+    ).ended;
+    expect(download).toMatchObject({ state: 'done' });
+    await vi.waitFor(async () => expect((await originals.size()).videos).toBe(1));
+
+    // As subs.rocks would say it, from what storage answered when it was written.
+    const bytes = files.get('kept-video')?.byteLength;
+    reads.clear();
+    const render = await startJob(job(TOKEN, `${bytes}:etag-of-kept-video`), context).ended;
+    expect(render).toMatchObject({ state: 'done' });
+    expect(reads.get('original')).toBeUndefined();
+  });
+
+  it('reads storage when its copy is damaged, and renders all the same', async () => {
+    const store = new Store(join(work, 'node-damaged'));
+    await store.prepare();
+    const originals = new Originals(
+      store.originalsDir,
+      { maxBytes: 1e9, maxAgeMs: 60_000, freeBytes: 0 },
+      quiet,
+    );
+    await originals.prepare();
+    const version = `${files.get('original')?.byteLength}:ghi`;
+    const context = {
+      server: origin,
+      store,
+      log: quiet,
+      tools,
+      hardware: null,
+      budget: { threads: 4, memoryBytes: 8 * 1024 ** 3 },
+      originals,
+      onProgress: () => undefined,
+      command,
+    };
+    await startJob(job(TOKEN, version), context).ended;
+    await vi.waitFor(async () => expect((await originals.size()).videos).toBe(1));
+    const copy = readdirSync(store.originalsDir).find((name) => /^[0-9a-f]{64}$/.test(name)) ?? '';
+    const bytes = readFileSync(join(store.originalsDir, copy));
+    bytes[100] = (bytes[100] ?? 0) ^ 0xff;
+    writeFileSync(join(store.originalsDir, copy), bytes);
+    reads.clear();
+    expect(await startJob(job(TOKEN, version), context).ended).toMatchObject({ state: 'done' });
+    expect(reads.get('original')).toBeGreaterThan(0);
+  });
+
   it('is made in pieces at once where it’s told to, joined frame for frame, with its sound', async () => {
     // In this process: the engine reads and writes where the node would have it.
     Object.assign(config, { ioOrigin: `${origin}/api/nodes/io`, ioToken: TOKEN });
@@ -370,6 +511,31 @@ describe('a render on this machine', () => {
     ) as { streams: { codec_name: string; nb_read_packets?: string }[] };
     expect(probed.streams.map((stream) => stream.codec_name)).toEqual(['h264', 'aac']);
     expect(probed.streams[0]?.nb_read_packets).toBe('50');
+  });
+
+  it('makes its pieces and sound from the copy it’s given, reading nothing from storage', async () => {
+    Object.assign(config, { ioOrigin: `${origin}/api/nodes/io`, ioToken: TOKEN });
+    const dir = join(work, 'pieces-own');
+    mkdirSync(dir, { recursive: true });
+    const own = join(dir, 'original');
+    writeFileSync(own, files.get('original') ?? Buffer.alloc(0));
+    reads.clear();
+    const result = await renderInParallel(
+      {
+        ...(job().input as RenderJob),
+        output: { key: 'pieces-own.mp4' },
+        grid: { fps: '25', frames: 50 },
+      },
+      dir,
+      {},
+      {
+        machine: { threads: 4, memoryBytes: 8 * 1024 ** 3 },
+        plan: { slots: 2, pieces: 3, threads: 2 },
+        original: own,
+      },
+    );
+    expect(result).toMatchObject({ width: 320, height: 240, durationMs: 2000 });
+    expect(reads.get('original')).toBeUndefined();
   });
 });
 

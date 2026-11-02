@@ -299,8 +299,12 @@ export function heldBack(said: string): boolean {
 export async function fetchVideo(
   job: FetchJob,
   dir: string,
-  /** How much has come, each time it's written (a node shows it in its log). */
-  onFraction?: (fraction: number) => void,
+  hooks: {
+    /** How much has come, each time it's written (a node shows it in its log). */
+    onFraction?: (fraction: number) => void;
+    /** Where the video is on this machine, and its ETag in storage (a node keeps it, ADR 0093). */
+    onStored?: (path: string, bytes: number, etag: string | undefined) => void;
+  } = {},
 ): Promise<FetchResult> {
   const limit = Math.min(job.maxBytes ?? MAX_FETCH_BYTES, MAX_FETCH_BYTES);
   const argsFor = (cap: number) => {
@@ -398,7 +402,7 @@ export async function fetchVideo(
     reported = now;
     const value = { fraction: progress.fraction(), at: now, details };
     // Best effort, one at a time: a lost update is replaced by the next.
-    onFraction?.(value.fraction);
+    hooks.onFraction?.(value.fraction);
     pending = pending.then(() => putJson(job.progress.key, value).catch(() => {}));
   };
 
@@ -483,7 +487,12 @@ export async function fetchVideo(
   }
   const page = await readPage();
   const extension = basename(path).split('.').pop()?.toLowerCase() ?? '';
-  const output = await putFile(path, job.output.key, VIDEO_MIME[extension] ?? 'video/mp4');
+  const { etag, ...output } = await putFile(
+    path,
+    job.output.key,
+    VIDEO_MIME[extension] ?? 'video/mp4',
+  );
+  hooks.onStored?.(path, output.bytes, etag);
   const told = detailsOf(info);
   await putJson(job.progress.key, { fraction: 1, at: Date.now(), details: told }).catch(() => {});
   const seconds = typeof info['duration'] === 'number' ? info['duration'] : null;

@@ -2,6 +2,7 @@ import { JobError } from '../engine/errors.ts';
 import { fetchVideo } from '../engine/fetch.ts';
 import { renderInParallel } from '../engine/parallel.ts';
 import { EngineError, FetchError, FetchJob, RenderJob } from '../job.ts';
+import { fileVersion } from './originals.ts';
 import type { FromJob, ToJob } from './runner.ts';
 
 /**
@@ -23,8 +24,11 @@ export async function jobProcess(): Promise<void> {
     if (message.kind === 'fetch') {
       const job = FetchJob.parse(message.input);
       const dir = process.env['WORK_DIR'] ?? '.';
-      const result = await fetchVideo(job, dir, (fraction) => {
-        void send({ type: 'fetched', fraction });
+      const result = await fetchVideo(job, dir, {
+        onFraction: (fraction) => void send({ type: 'fetched', fraction }),
+        onStored: (path, bytes, etag) => {
+          if (etag) void send({ type: 'stored', path, version: fileVersion(bytes, etag) });
+        },
       });
       await send({ type: 'done', result });
       process.disconnect?.();
@@ -38,7 +42,11 @@ export async function jobProcess(): Promise<void> {
         onProgress: (progress) => void send({ type: 'progress', ...progress }),
         onPieces: (plan) => void send({ type: 'pieces', ...plan }),
       },
-      { ...(message.hardware ? { hardware: message.hardware } : {}), machine: message.budget },
+      {
+        ...(message.hardware ? { hardware: message.hardware } : {}),
+        ...(message.original ? { original: message.original } : {}),
+        machine: message.budget,
+      },
     );
     await send({ type: 'done', result });
   } catch (error) {

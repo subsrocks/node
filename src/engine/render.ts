@@ -382,7 +382,12 @@ export type RenderHooks = {
  * machines' NVENC unless it says which), and on how many of its threads the CPU's encoders run
  * (all it has unless told; a machine whose ffmpeg sees more processors than it may use is told).
  */
-export type RenderOptions = { hardware?: Hardware; threads?: number | null };
+export type RenderOptions = {
+  hardware?: Hardware;
+  threads?: number | null;
+  /** The original where the machine already has it (a node's own copy, ADR 0093): not read again. */
+  original?: string;
+};
 
 /** Burns the subtitles into the original with the template's fonts. */
 export async function render(
@@ -397,7 +402,9 @@ export async function render(
   const env = await prepareRender(job, workDir);
   // Its picture and sound read together: from a copy where there's room. A piece reads
   // only the picture, and the render's sound only the sound, which streams well whatever the file.
-  const input = await originalInput(job.input.key, workDir, () => RENDER_SPARE_BYTES, preparing.io);
+  const input =
+    options.original ??
+    (await originalInput(job.input.key, workDir, () => RENDER_SPARE_BYTES, preparing.io));
   await preparing.settle();
   const on = encoderOf(job, options.hardware);
 

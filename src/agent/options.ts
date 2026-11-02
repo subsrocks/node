@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { DEFAULT_ORIGINALS } from './originals.ts';
 import type { LogFormat } from './output.ts';
 
 /**
@@ -37,6 +38,10 @@ export type Options = {
   cookies: OnOff;
   /** The yt-dlp to download with, or null to find one (`ytdlp.ts`). */
   ytDlp: string | null;
+  /** The most bytes of originals it keeps for its next renders; 0, none (`originals.ts`). */
+  keepOriginals: number;
+  /** The bytes it leaves free on the disk, whatever it may keep. */
+  keepFree: number;
 };
 
 export class UsageError extends Error {}
@@ -63,6 +68,9 @@ Options
                     (SUBS_COOKIES, default on)
   --yt-dlp <path>   the yt-dlp to download with (SUBS_YTDLP); found if not given: the PATH's, else
                     its pinned release, downloaded once into the data folder
+  --keep-originals <GB>|off  keep up to this much of the videos it has read, for 30 days, so the
+                    next render needn't bring them over (SUBS_KEEP_ORIGINALS, default 50)
+  --keep-free <GB>  never keep them at the cost of this much free disk (SUBS_KEEP_FREE, default 20)
   --url <url>       where subs.rocks is (SUBS_URL, default https://subs.rocks)
   --data <dir>      where it keeps its credential, fonts and work (SUBS_DATA)
   --log pretty|json how it writes its log (SUBS_LOG, default pretty)
@@ -147,6 +155,8 @@ export function parseOptions(argv: readonly string[], env: NodeJS.ProcessEnv): O
   };
   const downloads = onOff('downloads', values.downloads ?? env['SUBS_DOWNLOADS']);
   const cookies = onOff('cookies', values.cookies ?? env['SUBS_COOKIES']);
+  const keepOriginals = keptBytes(values['keep-originals'] ?? env['SUBS_KEEP_ORIGINALS']);
+  const keepFree = freeBytes(values['keep-free'] ?? env['SUBS_KEEP_FREE']);
   return {
     command: first as Command,
     server: serverUrl(values.url ?? env['SUBS_URL'] ?? 'https://subs.rocks'),
@@ -160,7 +170,30 @@ export function parseOptions(argv: readonly string[], env: NodeJS.ProcessEnv): O
     downloads,
     cookies,
     ytDlp: values['yt-dlp'] ?? env['SUBS_YTDLP'] ?? null,
+    keepOriginals,
+    keepFree,
   };
+}
+
+/** `--keep-free`: gigabytes. */
+function freeBytes(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_ORIGINALS.freeBytes;
+  const gigabytes = Number(value);
+  if (value.trim() === '' || !Number.isFinite(gigabytes) || gigabytes < 0) {
+    throw new UsageError('--keep-free is a number of gigabytes');
+  }
+  return gigabytes * 1e9;
+}
+
+/** `--keep-originals`: gigabytes, or `off`. */
+function keptBytes(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_ORIGINALS.maxBytes;
+  if (value === 'off') return 0;
+  const gigabytes = Number(value);
+  if (value.trim() === '' || !Number.isFinite(gigabytes) || gigabytes < 0) {
+    throw new UsageError('--keep-originals is a number of gigabytes, or off');
+  }
+  return gigabytes * 1e9;
 }
 
 const OPTIONS = {
@@ -171,6 +204,8 @@ const OPTIONS = {
   downloads: { type: 'string' },
   cookies: { type: 'string' },
   'yt-dlp': { type: 'string' },
+  'keep-originals': { type: 'string' },
+  'keep-free': { type: 'string' },
   url: { type: 'string' },
   data: { type: 'string' },
   log: { type: 'string' },
@@ -192,5 +227,7 @@ function base(env: NodeJS.ProcessEnv): Omit<Options, 'command'> {
     downloads: 'on',
     cookies: 'on',
     ytDlp: null,
+    keepOriginals: DEFAULT_ORIGINALS.maxBytes,
+    keepFree: DEFAULT_ORIGINALS.freeBytes,
   };
 }

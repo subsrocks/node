@@ -5,7 +5,8 @@ import { NodeJobKind, NodeJobOutcome } from '../protocol.ts';
 
 /**
  * The node's folder (`--data`): its credential, the jobs' ends it hasn't been able to report yet,
- * the built-in fonts, its yt-dlp when it fetched one, and a folder per job while it works. In the image it's the `/data` volume,
+ * the built-in fonts, its yt-dlp when it fetched one, the originals it keeps, and a folder per job
+ * while it works. In the image it's the `/data` volume,
  * so the node keeps its place in the workspace across restarts and updates.
  */
 
@@ -44,6 +45,11 @@ export class Store {
 
   get workDir(): string {
     return join(this.dir, 'work');
+  }
+
+  /** The originals it keeps for its next renders (`originals.ts`). */
+  get originalsDir(): string {
+    return join(this.dir, 'originals');
   }
 
   /** Its folders, made where missing, and what a job left behind cleared. */
@@ -88,6 +94,8 @@ export class Store {
   async forget(): Promise<void> {
     await rm(join(this.dir, 'node.json'), { force: true });
     await rm(join(this.dir, 'pending.json'), { force: true });
+    // Its workspace's videos, gone with its place in it.
+    await rm(this.originalsDir, { recursive: true, force: true });
   }
 
   async pending(): Promise<Pending[]> {

@@ -3,13 +3,14 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { nvidiaGpus, trialArgs, trialSettings, vaapiName } from '../src/agent/hardware.ts';
 import {
   describeMachine,
@@ -26,6 +27,7 @@ import {
   serverUrl,
   UsageError,
 } from '../src/agent/options.ts';
+import { Originals } from '../src/agent/originals.ts';
 import { duration, Output, size } from '../src/agent/output.ts';
 import { jobLine, newer } from '../src/agent/session.ts';
 import { Store } from '../src/agent/store.ts';
@@ -442,5 +444,123 @@ describe('its downloader', () => {
         `YTDLP_SHA256_ARM64=${YTDLP_RELEASE.assets['linux-arm64']?.sha256}`,
       );
     }
+  });
+});
+
+describe('the originals it keeps', () => {
+  const quiet = { warn: () => undefined, debug: () => undefined };
+  const limits = { maxBytes: 1000, maxAgeMs: 1000, freeBytes: 0 };
+  /** A folder, a clock to move, and a job's whole original of `bytes` to keep. */
+  async function kept(over: Partial<typeof limits> = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'subs-node-originals-'));
+    let at = 10_000;
+    const originals = new Originals(join(dir, 'kept'), { ...limits, ...over }, quiet, () => at);
+    await originals.prepare();
+    const take = async (version: string, bytes: number, fill = 'x') => {
+      const file = join(dir, `job-${version.replace(/\W/g, '')}`);
+      writeFileSync(file, fill.repeat(bytes));
+      await originals.take(version, file);
+      // Moved at once, checked after: waited for here.
+      await vi.waitFor(async () => {
+        const found = readdirSync(join(dir, 'kept'));
+        expect(found.filter((name) => name.endsWith('.partial'))).toEqual([]);
+        expect(found.some((name) => name.endsWith('.json'))).toBe(true);
+      });
+    };
+    const pass = (ms: number) => {
+      at += ms;
+    };
+    return { dir, originals, take, pass };
+  }
+
+  it('gives a job its copy of the same version, linked, and no other', async () => {
+    const { dir, originals, take } = await kept();
+    await take('100:abc', 100);
+    const job = join(dir, 'original');
+    expect(await originals.linkInto('100:abc', job)).toBe(true);
+    expect(readFileSync(job, 'utf8')).toBe('x'.repeat(100));
+    // Replaced in storage, its version isn't this one: read from there.
+    expect(await originals.linkInto('100:def', join(dir, 'other'))).toBe(false);
+    expect(await originals.size()).toEqual({ videos: 1, bytes: 100 });
+  });
+
+  it('keeps only a whole file: a part, a stopped copy, an unreadable version aren’t', async () => {
+    const { dir, originals } = await kept();
+    const part = join(dir, 'part');
+    writeFileSync(part, 'x'.repeat(40));
+    await originals.take('100:abc', part);
+    await originals.take('not a version', part);
+    await originals.take('100:abc', join(dir, 'nowhere'));
+    expect(await originals.size()).toEqual({ videos: 0, bytes: 0 });
+    expect(existsSync(part)).toBe(true);
+  });
+
+  it('drops a damaged copy, and the job reads storage', async () => {
+    const { dir, originals, take } = await kept();
+    await take('100:abc', 100);
+    const copy = readdirSync(join(dir, 'kept')).find((name) => /^[0-9a-f]{64}$/.test(name)) ?? '';
+    // The same size: only the checksum can tell.
+    writeFileSync(join(dir, 'kept', copy), 'y'.repeat(100));
+    expect(await originals.linkInto('100:abc', join(dir, 'original'))).toBe(false);
+    expect(existsSync(join(dir, 'original'))).toBe(false);
+    expect(await originals.size()).toEqual({ videos: 0, bytes: 0 });
+  });
+
+  it('stays within its limits: the used longest ago goes first, then what’s past its time', async () => {
+    const { dir, originals, take, pass } = await kept();
+    await take('600:old', 600);
+    pass(10);
+    await take('300:new', 300);
+    pass(10);
+    // Used again: no longer the oldest.
+    expect(await originals.linkInto('600:old', join(dir, 'a'))).toBe(true);
+    pass(10);
+    await take('400:big', 400);
+    await vi.waitFor(async () => expect((await originals.size()).bytes).toBe(1000));
+    expect(await originals.linkInto('300:new', join(dir, 'b'))).toBe(false);
+    pass(5000);
+    await originals.sweep();
+    expect(await originals.size()).toEqual({ videos: 0, bytes: 0 });
+    // A job's link outlives its copy.
+    expect(readFileSync(join(dir, 'a'), 'utf8')).toBe('x'.repeat(600));
+  });
+
+  it('keeps nothing larger than it may, and leaves the disk its room', async () => {
+    const tight = await kept({ maxBytes: 50 });
+    const file = join(tight.dir, 'large');
+    writeFileSync(file, 'x'.repeat(100));
+    await tight.originals.take('100:abc', file);
+    expect(await tight.originals.size()).toEqual({ videos: 0, bytes: 0 });
+    const full = await kept({ freeBytes: Number.MAX_SAFE_INTEGER });
+    const small = join(full.dir, 'small');
+    writeFileSync(small, 'x'.repeat(10));
+    await full.originals.take('10:abc', small);
+    await vi.waitFor(async () => {
+      expect(readdirSync(join(full.dir, 'kept'))).toEqual([]);
+    });
+  });
+
+  it('goes with its place in the workspace', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'subs-node-forget-'));
+    const store = new Store(dir);
+    await store.prepare();
+    mkdirSync(store.originalsDir, { recursive: true });
+    writeFileSync(join(store.originalsDir, 'video'), 'x');
+    await store.forget();
+    expect(existsSync(store.originalsDir)).toBe(false);
+  });
+
+  it('is on unless told otherwise, up to 50 GB', () => {
+    expect(parseOptions([], {}).keepOriginals).toBe(50e9);
+    expect(parseOptions(['--keep-originals', '200'], {}).keepOriginals).toBe(200e9);
+    expect(parseOptions([], { SUBS_KEEP_ORIGINALS: 'off' }).keepOriginals).toBe(0);
+    expect(() => parseOptions(['--keep-originals', 'lots'], {})).toThrow(
+      '--keep-originals is a number of gigabytes, or off',
+    );
+    expect(parseOptions([], {}).keepFree).toBe(20e9);
+    expect(parseOptions(['--keep-free', '5'], { SUBS_KEEP_FREE: '9' }).keepFree).toBe(5e9);
+    expect(() => parseOptions(['--keep-free', 'x'], {})).toThrow(
+      '--keep-free is a number of gigabytes',
+    );
   });
 });

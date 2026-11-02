@@ -8,6 +8,7 @@ import { call, Refused, Unreachable } from './api.ts';
 import { jobProcess } from './job-process.ts';
 import { type Described, describeMachine, encodersLine, machineLine } from './machine.ts';
 import { type Options, parseOptions, USAGE, UsageError } from './options.ts';
+import { DEFAULT_ORIGINALS, Originals } from './originals.ts';
 import { Output, size } from './output.ts';
 import { Session } from './session.ts';
 import { type Credential, Store } from './store.ts';
@@ -83,6 +84,26 @@ async function downloaderOf(
   return found;
 }
 
+/** The originals it keeps for its next renders (`originals.ts`), and how many it may. */
+async function originalsOf(options: Options, store: Store, log: Output): Promise<Originals | null> {
+  if (options.keepOriginals === 0) return null;
+  const originals = new Originals(
+    store.originalsDir,
+    { ...DEFAULT_ORIGINALS, maxBytes: options.keepOriginals, freeBytes: options.keepFree },
+    log,
+  );
+  try {
+    await originals.prepare();
+  } catch (error) {
+    log.warn(`Not keeping videos: ${explain(error)}`);
+    return null;
+  }
+  log.info(
+    `Keeps up to ${size(options.keepOriginals)} of the videos it reads, for 30 days, to render them again sooner (--keep-originals)`,
+  );
+  return originals;
+}
+
 /** Its video hardware in a line, or what would give it some; null when there's nothing to say. */
 function hardwareLine(described: Described): { ok: boolean; text: string } | null {
   const found = described.hardware;
@@ -151,6 +172,7 @@ async function start(options: Options, log: Output): Promise<number> {
     }
   }
   const downloader = await downloaderOf(options, store, log);
+  const originals = await originalsOf(options, store, log);
   const session = new Session({
     server: options.server,
     credential,
@@ -161,6 +183,7 @@ async function start(options: Options, log: Output): Promise<number> {
     hardware: described.hardware?.hardware ?? null,
     downloader,
     cookies: options.cookies === 'on',
+    originals,
   });
   let asked = 0;
   const stop = (signal: NodeJS.Signals) => {
@@ -249,6 +272,18 @@ async function doctor(options: Options, log: Output): Promise<number> {
       const js = found.jsRuntime ? ` · ${found.jsRuntime} for YouTube` : '';
       log.ok(`yt-dlp ${found.version}${js}`);
     }
+  }
+  if (options.keepOriginals > 0) {
+    const kept = await new Originals(
+      store.originalsDir,
+      { ...DEFAULT_ORIGINALS, maxBytes: options.keepOriginals, freeBytes: options.keepFree },
+      log,
+    ).size();
+    log.ok(
+      `Keeps ${kept.videos} video${kept.videos === 1 ? '' : 's'} (${size(kept.bytes)}, up to ${size(options.keepOriginals)})`,
+    );
+  } else {
+    log.info('Keeps no videos (--keep-originals off)');
   }
   try {
     await call(options.server, '/api/health', {}, null);

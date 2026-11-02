@@ -15,6 +15,7 @@ import {
 } from '../protocol.ts';
 import { NODE_VERSION } from '../version.ts';
 import { call, headers, Refused, Unreachable } from './api.ts';
+import type { Originals } from './originals.ts';
 import { duration, type Output, size } from './output.ts';
 import { type RunningJob, startJob } from './runner.ts';
 import type { Credential, Pending, Store } from './store.ts';
@@ -106,6 +107,8 @@ export class Session {
   private readonly downloader: Downloader | null;
   /** Its downloads may sign in with the workspace's cookies (`--cookies`). */
   private readonly signsIn: boolean;
+  /** The originals it keeps for its next renders (`originals.ts`), unless it was told not to. */
+  private readonly originals: Originals | null;
   private socket: WebSocket | null = null;
   /** The render it's making, and the download beside it. */
   private job: RunningJob | null = null;
@@ -134,6 +137,7 @@ export class Session {
     hardware: Hardware | null;
     downloader?: Downloader | null;
     cookies?: boolean;
+    originals?: Originals | null;
   }) {
     this.server = context.server;
     this.credential = context.credential;
@@ -144,6 +148,7 @@ export class Session {
     this.hardware = context.hardware;
     this.downloader = context.downloader ?? null;
     this.signsIn = context.cookies ?? true;
+    this.originals = context.originals ?? null;
     this.budget = {
       threads: context.machine.cpu.threads,
       memoryBytes: context.machine.memoryBytes,
@@ -423,6 +428,7 @@ export class Session {
       hardware: this.hardware,
       budget: this.budget,
       downloader: this.downloader,
+      originals: this.originals,
       onProgress: ({ stage, fraction, remainingMs }) => {
         // Each stage on a line of its own.
         if (stage !== shown) this.log.endProgress();
