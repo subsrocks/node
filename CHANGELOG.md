@@ -2,6 +2,10 @@
 
 What changed in each release of the node, for whoever runs one. A release is published as `ghcr.io/subsrocks/node:<version>` and as programs on GitHub Releases.
 
+## 1.5.1
+
+- Updates the pinned `yt-dlp` downloader to `2026.10.26` (fixes YouTube signed-in and logged-out client refusals).
+
 ## 1.5.0
 
 - Keeps the originals it reads and the videos it downloads, so the next render of one doesn't bring it over again: up to 50 GB (`--keep-originals`, `off` for none), each for 30 days since it was last used, never leaving less than 20 GB free (`--keep-free`). A copy is known by its version in subs.rocks's storage, so a video replaced there is read again, and checked against its SHA-256 before every use, so a damaged one is too. They go when the machine leaves its workspace.

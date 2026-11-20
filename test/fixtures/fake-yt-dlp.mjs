@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 const args = process.argv.slice(2);
 if (args[0] === '--version') {
-  process.stdout.write('2026.08.19\n');
+  process.stdout.write('2026.10.26\n');
   process.exit(0);
 }
 const option = (name) => {

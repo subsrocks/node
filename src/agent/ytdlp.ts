@@ -16,24 +16,24 @@ const run = promisify(execFile);
 
 /** The release a node fetches for itself, and each platform's file of it with its SHA-256. */
 export const YTDLP_RELEASE = {
-  version: '2026.08.19',
+  version: '2026.10.26',
   assets: {
     'linux-x64': {
       file: 'yt-dlp_linux',
-      sha256: '58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a',
+      sha256: '767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795',
     },
     'linux-arm64': {
       file: 'yt-dlp_linux_aarch64',
-      sha256: 'b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc',
+      sha256: 'e87e9533e89fe5889abaa21f5114dfe7756d6aa6219b83551add04d48b18e483',
     },
     // One file for Apple silicon and Intel.
     'darwin-arm64': {
       file: 'yt-dlp_macos',
-      sha256: '0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202',
+      sha256: '0f922c15ccc0b83eefa1c8bc9104e434318c4bf16e408e1ee93b7745a6efe0aa',
     },
     'darwin-x64': {
       file: 'yt-dlp_macos',
-      sha256: '0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202',
+      sha256: '0f922c15ccc0b83eefa1c8bc9104e434318c4bf16e408e1ee93b7745a6efe0aa',
     },
   } as Record<string, { file: string; sha256: string }>,
 } as const;

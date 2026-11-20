@@ -408,7 +408,7 @@ describe('its downloader', () => {
 
   it('is the one it was told, when that runs', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'subs-node-ytdlp-'));
-    expect(await findDownloader(fake, dir)).toMatchObject({ ytDlp: fake, version: '2026.08.19' });
+    expect(await findDownloader(fake, dir)).toMatchObject({ ytDlp: fake, version: '2026.10.26' });
     expect(await findDownloader('/nowhere/yt-dlp', dir)).toEqual({
       problem: "--yt-dlp /nowhere/yt-dlp doesn't run",
     });
