@@ -23,7 +23,12 @@ if (url.includes('refused')) {
   process.exit(1);
 }
 const cookies = option('--cookies');
+const extractorArgs = option('--extractor-args');
 const signedIn = cookies !== undefined && readFileSync(cookies, 'utf8').includes('\tSESSDATA\t');
+if (cookies !== undefined && extractorArgs !== 'youtube:player_client=default,-web_embedded') {
+  process.stderr.write(`ERROR: missing signed-in extractor args (${extractorArgs ?? 'none'})\n`);
+  process.exit(1);
+}
 const dir = option('--paths') ?? process.cwd();
 const path = join(dir, 'video.mp4');
 const title = signedIn ? 'A video, signed in' : 'A video';

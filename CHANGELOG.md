@@ -2,6 +2,10 @@
 
 What changed in each release of the node, for whoever runs one. A release is published as `ghcr.io/subsrocks/node:<version>` and as programs on GitHub Releases.
 
+## 1.5.2
+
+- Drops YouTube's `web_embedded` client on signed-in downloads (`youtube:player_client=default,-web_embedded`), working around YouTube's November 2026 PO-token 403s on `yt-dlp 2026.10.26` (yt-dlp#17989 / #18051).
+
 ## 1.5.1
 
 - Updates the pinned `yt-dlp` downloader to `2026.10.26` (fixes YouTube signed-in and logged-out client refusals).

@@ -286,6 +286,14 @@ export function heldBack(said: string): boolean {
 }
 
 /**
+ * YouTube player clients for a signed-in download: drop `web_embedded`, which YouTube began gating
+ * behind PO tokens in November 2026 (yt-dlp#17989; fixed after 2026.10.26 in yt-dlp#18051). Without
+ * a PO token provider, `2026.10.26` tries `web_embedded` first on free accounts and fails with
+ * HTTP 403 on the media stream; dropping it lets `tv_samsung` run first.
+ */
+export const SIGNED_IN_YT_EXTRACTOR_ARGS = 'youtube:player_client=default,-web_embedded';
+
+/**
  * Downloads a linked video into storage as its source's original (SRC-2, ADR 0021): the best up
  * to the workspace's plan's cap, 4K or 1080p, that fits what a download keeps (the plan's files,
  * ADR 0054; else 4 GB): by the sizes its page lists, at once (formatsFor); else smaller each time
@@ -357,7 +365,9 @@ export async function fetchVideo(
         ? ['--js-runtimes', config.ytDlpJsRuntime, '--remote-components', 'ejs:github']
         : []),
     ];
-    if (cookies) args.push('--cookies', cookies);
+    if (cookies) {
+      args.push('--cookies', cookies, '--extractor-args', SIGNED_IN_YT_EXTRACTOR_ARGS);
+    }
     args.push('--', job.url);
     return args;
   };
