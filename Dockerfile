@@ -31,9 +31,9 @@ FROM ${NODE_IMAGE} AS node
 # itself (a test keeps the two the same).
 FROM ${RUNTIME_IMAGE} AS ytdlp
 ARG TARGETARCH
-ARG YTDLP_VERSION=2026.10.26
-ARG YTDLP_SHA256_AMD64=767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795
-ARG YTDLP_SHA256_ARM64=e87e9533e89fe5889abaa21f5114dfe7756d6aa6219b83551add04d48b18e483
+ARG YTDLP_VERSION=2026.11.23
+ARG YTDLP_SHA256_AMD64=249ddb058234276bc449b9cd9492aad9f133bda5923c61a9e39983ae114ef17d
+ARG YTDLP_SHA256_ARM64=fb847a2e4a9ddc8cf5fcfb4bb7f42ba8969ecf72068def0278074f9d300bd13c
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
